@@ -18,6 +18,15 @@ const LEAD_INCLUDE = {
   _count: { select: { notes: true, tasks: true, activities: true } },
 };
 
+// Safe enrollment helper: Side effects must never fail client requests
+const safeEnrollLead = async (lead, orgId, userId) => {
+  try {
+    await enrollLeadInActiveCampaigns(lead, orgId, userId);
+  } catch (error) {
+    console.error(`[leadController] Background campaign enrollment skipped for lead ${lead?.id}:`, error.message);
+  }
+};
+
 const buildLeadWhere = ({ search, status, source, tagId, assigneeId, scoreMin, scoreMax }) => {
   const where = {};
   if (search) {
@@ -93,23 +102,12 @@ const createLead = asyncHandler(async (req, res) => {
     },
     include: LEAD_INCLUDE,
   });
-  // await updateLeadScore(lead.id);
+
   const updated = await prisma.lead.findUnique({ where: { id: lead.id }, include: LEAD_INCLUDE });
 
-  // Reconcile new leads before responding so a RUNNING campaign sees them
-  // immediately when their latest audience matches.
-  try {
-    await enrollLeadInActiveCampaigns(updated, req.orgId, req.user.id);
-  } catch (error) {
-    console.error("Failed to auto-enroll lead into campaigns:", error);
-  }
-  
-  // ---------------------------------------------------------------------------
-  // NOTIFICATION: Always notify the AUTHENTICATED USER who triggered this event.
-  // userId must come from req.user.id (verified JWT session) — never from
-  // req.body.userId or any client-supplied field. The user's own preference
-  // toggles determine whether they receive in-app, email, or push notifications.
-  // ---------------------------------------------------------------------------
+  // Safe background campaign enrollment
+  await safeEnrollLead(updated, req.orgId, req.user.id);
+
   dispatchNotification({
     userId: req.user.id,
     orgId: req.orgId,
@@ -119,10 +117,7 @@ const createLead = asyncHandler(async (req, res) => {
     link: `/app/leads/${lead.id}`,
     metadata: { leadId: lead.id, leadName: lead.name },
   }).catch(console.error);
-  // TODO: Add similar dispatchNotification calls for:
-  //   - BILLING category: in billingController after payment/invoice events
-  //   - TEAM category:    in teamController after invite/join/role-change events
-  //   - SYSTEM category:  in adminController for system-wide alerts
+
   recordActivity({
     leadId: lead.id,
     userId: req.user.id,
@@ -130,6 +125,7 @@ const createLead = asyncHandler(async (req, res) => {
     type: "CREATED",
     title: `${req.user.name} created this lead`,
   }).catch(console.error);
+
   incrementUsage({ userId: req.user.id, orgId: req.orgId, resource: "leads" }).catch(console.error);
   recordAudit({
     userId: req.user.id,
@@ -138,6 +134,7 @@ const createLead = asyncHandler(async (req, res) => {
     entityType: "Lead",
     entityId: lead.id,
   }).catch(console.error);
+
   await publish({ orgId: req.orgId, event: "LEAD_CREATED", payload: { leadId: lead.id, name: lead.name } });
   return response.created(res, updated);
 });
@@ -183,15 +180,15 @@ const getLeadById = asyncHandler(async (req, res) => {
   });
   if (!lead) throw new AppError("Lead not found.", 404);
 
-const replyEvents = await prisma.emailEvent.findMany({
-  where: {
-    orgId: req.orgId,
-    recipient: lead.email,
-    type: "REPLIED",
-  },
-  orderBy: { createdAt: "desc" },
-  take: 10,
-});
+  const replyEvents = await prisma.emailEvent.findMany({
+    where: {
+      orgId: req.orgId,
+      recipient: lead.email,
+      type: "REPLIED",
+    },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+  });
 
   const enrichment = lead.scoreDetails?.enrichment || lead.engagement?.enrichment || null;
 
@@ -218,10 +215,8 @@ const enrichLead = asyncHandler(async (req, res) => {
     throw new AppError("Lead not found.", 404);
   }
 
-  // 1. Run real-data lead enrichment service
   const { fieldUpdates, enrichmentPayload } = await leadEnrichmentService.enrichLeadRecord(lead);
 
-  // 2. Merge enrichment data into scoreDetails and engagement
   const existingScoreDetails =
     lead.scoreDetails && typeof lead.scoreDetails === "object" && !Array.isArray(lead.scoreDetails)
       ? lead.scoreDetails
@@ -242,7 +237,6 @@ const enrichLead = asyncHandler(async (req, res) => {
     lastEnrichedAt: enrichmentPayload.enrichedAt,
   };
 
-  // 3. Update lead in DB
   const updatedLead = await prisma.lead.update({
     where: { id: lead.id },
     data: {
@@ -270,7 +264,6 @@ const enrichLead = asyncHandler(async (req, res) => {
     },
   });
 
-  // 4. Record Activity Timeline
   const appliedCount = Object.keys(fieldUpdates).length;
   recordActivity({
     leadId: lead.id,
@@ -290,7 +283,6 @@ const enrichLead = asyncHandler(async (req, res) => {
     },
   }).catch(console.error);
 
-  // 5. Usage, Audit, and Webhook
   incrementUsage({ userId: req.user.id, orgId: req.orgId, resource: "searches" }).catch(console.error);
   recordAudit({
     userId: req.user.id,
@@ -322,7 +314,6 @@ const updateLead = asyncHandler(async (req, res) => {
     include: LEAD_INCLUDE,
   });
 
-  // Record activity for meaningful changes.
   const changes = diffLead(before, lead);
   if (changes.length) {
     recordActivity({
@@ -360,8 +351,6 @@ const updateLead = asyncHandler(async (req, res) => {
     }).catch(console.error);
   }
 
-  // Re-score before campaign reconciliation so a By Score audience always
-  // uses the lead's latest calculated score.
   const scoreNeedsRefresh = changes.some((c) =>
     ["engagement", "source"].includes(c.field)
   );
@@ -385,7 +374,6 @@ const updateLead = asyncHandler(async (req, res) => {
 
   if (changes.length > 0) {
     const targetUserId = lead.assignedToId ? lead.assignedToId : req.user.id;
-    // Don't notify the user if they made the change themselves, unless they are the only one to notify
     if (targetUserId !== req.user.id || !lead.assignedToId) {
       dispatchNotification({
         userId: targetUserId,
@@ -401,9 +389,8 @@ const updateLead = asyncHandler(async (req, res) => {
 
   const refreshed = await prisma.lead.findUnique({ where: { id: lead.id }, include: LEAD_INCLUDE });
 
-  // Lead status/segment fields can change campaign membership. Reconcile the
-  // lead immediately against every RUNNING campaign using the latest audience.
-  await enrollLeadInActiveCampaigns(refreshed, req.orgId, req.user.id);
+  // [FIX ITEM 6]: enrollLeadInActiveCampaigns is wrapped safely so errors never fail the lead update response
+  await safeEnrollLead(refreshed, req.orgId, req.user.id);
 
   return response.success(res, refreshed);
 });
@@ -454,9 +441,11 @@ const bulkUpdate = asyncHandler(async (req, res) => {
     where: { id: { in: ids.map(Number) }, orgId: req.orgId },
     select: { id: true, email: true },
   });
-  await Promise.all(
+
+  // [FIX ITEM 6]: Promise.all settled safely so any single enrollment failure doesn't 500 bulkUpdate
+  await Promise.allSettled(
     updatedLeads.map((lead) =>
-      enrollLeadInActiveCampaigns(lead, req.orgId, req.user.id)
+      safeEnrollLead(lead, req.orgId, req.user.id)
     )
   );
 

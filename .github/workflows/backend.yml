@@ -65,11 +65,16 @@ jobs:
           done
           echo "Install complete"
 
+      - name: Setup Shadow Database
+        run: |
+          docker exec $(docker ps -q --filter ancestor=postgres:16) psql -U postgres -d salesforge_test -c "CREATE DATABASE salesforge_shadow_test;" || true
+
       - name: Generate Prisma client
         working-directory: backend
         env:
           DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
           DIRECT_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
+          SHADOW_DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_shadow_test
         run: npx prisma generate
 
       - name: Run Prisma format check
@@ -77,6 +82,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
           DIRECT_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
+          SHADOW_DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_shadow_test
         run: npx prisma format --check || npx prisma format
 
       - name: Validate Prisma schema
@@ -84,6 +90,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
           DIRECT_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
+          SHADOW_DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_shadow_test
         run: npx prisma validate
 
       - name: Lint backend
@@ -100,14 +107,16 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
           DIRECT_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
+          SHADOW_DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_shadow_test
         run: |
-          npx prisma db push --skip-generate --accept-data-loss || npx prisma migrate deploy
+          npx prisma migrate deploy || npx prisma db push --skip-generate --accept-data-loss
 
       - name: Seed database
         working-directory: backend
         env:
           DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
           DIRECT_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
+          SHADOW_DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_shadow_test
         run: node prisma/seed.js
 
       - name: Boot server
@@ -115,6 +124,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
           DIRECT_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
+          SHADOW_DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_shadow_test
           PORT: 3001
           NODE_ENV: test
           JWT_SECRET: test-secret-for-ci

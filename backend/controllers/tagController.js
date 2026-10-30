@@ -6,7 +6,7 @@ const slugify = require("../utils/slugify");
 const { incrementUsage } = require("../services/usageService");
 const { enrollLeadInActiveCampaigns } = require("../services/campaignAutomationService");
 
-// Every query in this controller is scoped to the caller's organization.
+// Every query in this controller is strictly scoped to the caller's organization.
 const getOrgId = (req) => {
   const orgId = req.orgId || req.user?.orgId || req.user?.organizationId;
   if (!orgId) throw new AppError("Organization context is required.", 403);
@@ -23,7 +23,7 @@ const safeEnroll = async (lead, orgId, userId) => {
   }
 };
 
-// 1. List: only tags of the caller's organization
+// 1. List: only tags belonging to the caller's organization
 const list = asyncHandler(async (req, res) => {
   const orgId = getOrgId(req);
   const items = await prisma.tag.findMany({
@@ -111,13 +111,13 @@ const attachToLead = asyncHandler(async (req, res) => {
     update: {},
   });
 
-  // Re-check active campaigns (never fails the request)
-  await safeEnroll(lead, orgId, req.user.id);
+  // Re-check active campaigns (safely wrapped in try/catch)
+  await safeEnroll(lead, orgId, req.user?.id);
 
   return response.success(res, { message: "Tag attached." });
 });
 
-// 6. DetachFromLead
+// 6. DetachFromLead: scoped to caller's organization
 const detachFromLead = asyncHandler(async (req, res) => {
   const orgId = getOrgId(req);
   const { leadId, tagId } = req.params;
@@ -131,12 +131,12 @@ const detachFromLead = asyncHandler(async (req, res) => {
     where: { leadId: lead.id, tagId: Number(tagId) },
   });
 
-  await safeEnroll(lead, orgId, req.user.id);
+  await safeEnroll(lead, orgId, req.user?.id);
 
   return response.success(res, { message: "Tag detached." });
 });
 
-// 7. ListForLead
+// 7. ListForLead: scoped to caller's organization
 const listForLead = asyncHandler(async (req, res) => {
   const orgId = getOrgId(req);
   const { leadId } = req.params;

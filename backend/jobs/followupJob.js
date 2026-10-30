@@ -15,6 +15,9 @@ const isPermanentCampaignConfigurationError = (error) =>
   error.statusCode >= 400 &&
   error.statusCode < 500;
 
+// Maximum retry limit before permanently marking the sequence enrollment as FAILED
+const MAX_CAMPAIGN_RETRY_ATTEMPTS = Math.max(1, Number(process.env.MAX_CAMPAIGN_RETRY_ATTEMPTS || 3));
+
 let running = false;
 let schedulerInterval = null;
 
@@ -224,11 +227,44 @@ const tasks = {
               step: enrollment.currentStep,
             });
 
-            const retryMinutes = Math.max(1, Number(process.env.CAMPAIGN_AI_RETRY_MINUTES || 3));
-            await prisma.sequenceEnrollment.updateMany({
-              where: { id: enrollment.id, status: "ACTIVE" },
-              data: { nextRunAt: new Date(Date.now() + retryMinutes * 60 * 1000) },
-            });
+            // [FIX ITEM 7]: Track retries with exponential backoff & fail after limit
+            const currentRetries = Number(enrollment.retryCount || 0) + 1;
+            const baseRetryMinutes = Math.max(1, Number(process.env.CAMPAIGN_AI_RETRY_MINUTES || 3));
+
+            if (currentRetries >= MAX_CAMPAIGN_RETRY_ATTEMPTS) {
+              await prisma.sequenceEnrollment.update({
+                where: { id: enrollment.id },
+                data: {
+                  status: "FAILED",
+                  nextRunAt: null,
+                  ...(enrollment.retryCount !== undefined ? { retryCount: currentRetries } : {}),
+                },
+              });
+
+              logger.error("job.sequence.enrollment_failed_permanently", {
+                enrollmentId: enrollment.id,
+                email: enrollment.email,
+                attempts: currentRetries,
+                maxAllowed: MAX_CAMPAIGN_RETRY_ATTEMPTS,
+              });
+            } else {
+              // Backoff delay: e.g., 3m, 6m, 9m
+              const backoffMinutes = baseRetryMinutes * currentRetries;
+              await prisma.sequenceEnrollment.updateMany({
+                where: { id: enrollment.id, status: "ACTIVE" },
+                data: {
+                  nextRunAt: new Date(Date.now() + backoffMinutes * 60 * 1000),
+                  ...(enrollment.retryCount !== undefined ? { retryCount: currentRetries } : {}),
+                },
+              });
+
+              logger.info("job.sequence.retry_scheduled", {
+                enrollmentId: enrollment.id,
+                email: enrollment.email,
+                retryAttempt: currentRetries,
+                nextRunInMinutes: backoffMinutes,
+              });
+            }
 
             continue;
           }
@@ -459,8 +495,7 @@ const activateDueCampaigns = async () => {
 };
 
 // Mark a running campaign complete once every enrollment has reached a terminal state.
-// Empty enrollment sets are deliberately ignored so campaigns with no matching leads
-// are not reported as completed accidentally.
+// [FIX ITEM 7]: Added FAILED to terminalStatuses so failed leads do not lock the campaign forever
 const reconcileCompletedCampaigns = async () => {
   const campaigns = await prisma.workflow.findMany({
     where: { trigger: "SCHEDULED_TIME", active: true },
@@ -471,7 +506,7 @@ const reconcileCompletedCampaigns = async () => {
     },
   });
 
-  const terminalStatuses = new Set(["COMPLETED", "STOPPED", "REPLIED", "BOUNCED"]);
+  const terminalStatuses = new Set(["COMPLETED", "STOPPED", "REPLIED", "BOUNCED", "FAILED"]);
 
   for (const campaign of campaigns) {
     const conditions =
