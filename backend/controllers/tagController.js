@@ -6,27 +6,39 @@ const slugify = require("../utils/slugify");
 const { incrementUsage } = require("../services/usageService");
 const { enrollLeadInActiveCampaigns } = require("../services/campaignAutomationService");
 
-// 1. List: Sabhi tags load karega (chahe kisi bhi org ya user ke bane hon)
+// Every query in this controller is scoped to the caller's organization.
+const getOrgId = (req) => {
+  const orgId = req.orgId || req.user?.orgId || req.user?.organizationId;
+  if (!orgId) throw new AppError("Organization context is required.", 403);
+  return Number(orgId);
+};
+
+// Campaign enrollment is a side effect: it must never turn a successful
+// tag operation into a 500.
+const safeEnroll = async (lead, orgId, userId) => {
+  try {
+    await enrollLeadInActiveCampaigns(lead, orgId, userId);
+  } catch (err) {
+    console.error("[tagController] enrollLeadInActiveCampaigns failed:", err.message);
+  }
+};
+
+// 1. List: only tags of the caller's organization
 const list = asyncHandler(async (req, res) => {
-  const currentOrgId = req.orgId || req.user?.orgId;
+  const orgId = getOrgId(req);
   const items = await prisma.tag.findMany({
-    where: {
-      OR: [
-        { orgId: currentOrgId ? Number(currentOrgId) : undefined },
-        { orgId: null },
-        { id: { gt: 0 } }, // Universal: Saare existing tags show karega
-      ],
-    },
+    where: { orgId },
     orderBy: { name: "asc" },
     include: { _count: { select: { leads: true } } },
   });
   return response.success(res, items);
 });
 
-// 2. Create: Naya tag banate waqt orgId aur userId attach karein
+// 2. Create: attach orgId and userId to the new tag
 const create = asyncHandler(async (req, res) => {
   const { name, color } = req.body;
   if (!name) throw new AppError("Tag name is required.", 400);
+  const orgId = getOrgId(req);
   const slug = slugify(name);
   try {
     const tag = await prisma.tag.create({
@@ -34,12 +46,12 @@ const create = asyncHandler(async (req, res) => {
         name,
         slug,
         color: color || "#3b82f6",
-        orgId: req.orgId || req.user?.orgId || null,
+        orgId,
         userId: req.user?.id || null,
       },
     });
-    if (req.user?.id && req.orgId) {
-      await incrementUsage({ userId: req.user.id, orgId: req.orgId, resource: "tags" }).catch(() => {});
+    if (req.user?.id) {
+      await incrementUsage({ userId: req.user.id, orgId, resource: "tags" }).catch(() => {});
     }
     return response.created(res, tag);
   } catch (error) {
@@ -48,8 +60,9 @@ const create = asyncHandler(async (req, res) => {
   }
 });
 
-// 3. Update: Strict orgId filter hatakar direct update
+// 3. Update: only within the caller's organization
 const update = asyncHandler(async (req, res) => {
+  const orgId = getOrgId(req);
   const { name, color } = req.body;
   const data = {};
   if (name !== undefined) {
@@ -57,38 +70,38 @@ const update = asyncHandler(async (req, res) => {
     data.slug = slugify(name);
   }
   if (color !== undefined) data.color = color;
-  
+
   const result = await prisma.tag.updateMany({
-    where: { id: Number(req.params.id) },
+    where: { id: Number(req.params.id), orgId },
     data,
   });
   if (result.count === 0) throw new AppError("Tag not found.", 404);
   return response.success(res, { message: "Tag updated." });
 });
 
-// 4. Remove: Strict orgId filter hatakar direct delete
+// 4. Remove: only within the caller's organization
 const remove = asyncHandler(async (req, res) => {
+  const orgId = getOrgId(req);
   const result = await prisma.tag.deleteMany({
-    where: { id: Number(req.params.id) },
+    where: { id: Number(req.params.id), orgId },
   });
   if (result.count === 0) throw new AppError("Tag not found.", 404);
   return response.success(res, { message: "Tag removed." });
 });
 
-// 5. AttachToLead: Kisi bhi user ke tag ko lead par attach karne ki permission
+// 5. AttachToLead: lead and tag must both belong to the caller's organization
 const attachToLead = asyncHandler(async (req, res) => {
+  const orgId = getOrgId(req);
   const { leadId } = req.params;
   const { tagId } = req.body;
 
-  // Lead check karein
-  const lead = await prisma.lead.findFirst({ 
-    where: { id: Number(leadId) } 
+  const lead = await prisma.lead.findFirst({
+    where: { id: Number(leadId), orgId },
   });
   if (!lead) throw new AppError("Lead not found.", 404);
 
-  // Tag check karein (bina kisi orgId restriction ke)
-  const tag = await prisma.tag.findFirst({ 
-    where: { id: Number(tagId) } 
+  const tag = await prisma.tag.findFirst({
+    where: { id: Number(tagId), orgId },
   });
   if (!tag) throw new AppError("Tag not found.", 404);
 
@@ -98,36 +111,44 @@ const attachToLead = asyncHandler(async (req, res) => {
     update: {},
   });
 
-  // Re-check active campaigns
-  await enrollLeadInActiveCampaigns(lead, lead.orgId || req.orgId, req.user.id);
+  // Re-check active campaigns (never fails the request)
+  await safeEnroll(lead, orgId, req.user.id);
 
   return response.success(res, { message: "Tag attached." });
 });
 
 // 6. DetachFromLead
 const detachFromLead = asyncHandler(async (req, res) => {
+  const orgId = getOrgId(req);
   const { leadId, tagId } = req.params;
+
+  const lead = await prisma.lead.findFirst({
+    where: { id: Number(leadId), orgId },
+  });
+  if (!lead) throw new AppError("Lead not found.", 404);
+
   await prisma.leadTag.deleteMany({
-    where: { leadId: Number(leadId), tagId: Number(tagId) },
+    where: { leadId: lead.id, tagId: Number(tagId) },
   });
 
-  const lead = await prisma.lead.findFirst({ where: { id: Number(leadId) } });
-  if (lead) {
-    await enrollLeadInActiveCampaigns(
-      lead,
-      lead.orgId || req.orgId,
-      req.user.id
-    );
-  }
+  await safeEnroll(lead, orgId, req.user.id);
 
   return response.success(res, { message: "Tag detached." });
 });
 
 // 7. ListForLead
 const listForLead = asyncHandler(async (req, res) => {
+  const orgId = getOrgId(req);
   const { leadId } = req.params;
+
+  const lead = await prisma.lead.findFirst({
+    where: { id: Number(leadId), orgId },
+    select: { id: true },
+  });
+  if (!lead) throw new AppError("Lead not found.", 404);
+
   const items = await prisma.leadTag.findMany({
-    where: { leadId: Number(leadId) },
+    where: { leadId: lead.id },
     include: { tag: true },
   });
   return response.success(res, items.map((i) => i.tag));

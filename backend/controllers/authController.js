@@ -90,16 +90,44 @@ const seedDefaultPreferences = async (userId, orgId = null) => {
   });
 };
 
+// Personal workspace so a new user can start using the product immediately.
+const createPersonalWorkspace = async (user, name, email) => {
+  const slug = `${slugify(name)}-${user.id}`;
+  const org = await prisma.organization.create({
+    data: {
+      name: `${name}'s workspace`,
+      slug,
+      region: "Global",
+      type: "Startup",
+      contactName: name,
+      contactEmail: email,
+      plan: "FREE",
+      status: "TRIALING",
+      trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+    },
+  });
+  await prisma.user.update({ where: { id: user.id }, data: { organizationId: org.id, role: "OWNER" } });
+  await prisma.orgMembership.create({
+    data: { userId: user.id, orgId: org.id, role: "OWNER" },
+  });
+  return org;
+};
+
+const ensureTrialSubscription = (userId, orgId) =>
+  prisma.subscription.upsert({
+    where: { orgId },
+    create: {
+      orgId,
+      userId,
+      plan: "FREE",
+      status: "TRIALING",
+      trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+    },
+    update: {},
+  });
+
 const register = asyncHandler(async (req, res) => {
   const email = req.body.email.trim().toLowerCase();
-
-  // FIN-TECH is a private shared workspace: new accounts must be invited.
-  if (!req.body.inviteToken) {
-    throw new AppError(
-      "FIN-TECH accounts are invite-only. Ask your workspace owner for an invitation.",
-      403
-    );
-  }
 
   const password = await bcrypt.hash(req.body.password, 12);
 
@@ -158,25 +186,7 @@ const register = asyncHandler(async (req, res) => {
       data: { acceptedAt: new Date() },
     });
   } else {
-    // Create personal workspace so the user can start using the product immediately.
-    const slug = `${slugify(req.body.name)}-${user.id}`;
-    const org = await prisma.organization.create({
-      data: {
-        name: `${req.body.name.trim()}'s workspace`,
-        slug,
-        region: "Global",
-        type: "Startup",
-        contactName: req.body.name.trim(),
-        contactEmail: email,
-        plan: "FREE",
-        status: "TRIALING",
-        trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-      },
-    });
-    await prisma.user.update({ where: { id: user.id }, data: { organizationId: org.id, role: "OWNER" } });
-    await prisma.orgMembership.create({
-      data: { userId: user.id, orgId: org.id, role: "OWNER" },
-    });
+    await createPersonalWorkspace(user, req.body.name.trim(), email);
   }
 
   // Auto-accept any other pending invites matching this email.
@@ -187,17 +197,7 @@ const register = asyncHandler(async (req, res) => {
   await seedDefaultPreferences(user.id, finalUser.organizationId);
 
   if (user.organizationId) {
-    await prisma.subscription.upsert({
-      where: { orgId: user.organizationId },
-      create: {
-        orgId: user.organizationId,
-        userId: user.id,
-        plan: "FREE",
-        status: "TRIALING",
-        trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-      },
-      update: {},
-    });
+    await ensureTrialSubscription(user.id, user.organizationId);
   }
 
   await dispatchNotification({
@@ -522,17 +522,14 @@ const googleLogin = asyncHandler(async (req, res) => {
   });
 
   if (!user) {
-    // Google sign-in must not create an unrestricted public workspace.
-    if (!inviteToken) {
-      throw new AppError(
-        "FIN-TECH accounts are invite-only. Open your team invitation before signing in with Google.",
-        403
-      );
-    }
-
-    const invite = await inviteService.getInvite(inviteToken);
-    if (invite.email.toLowerCase() !== email) {
-      throw new AppError("This invite was sent to a different email address.", 403);
+    // New Google user: join the invited org if an invite token is present,
+    // otherwise get a personal workspace (same as email/password signup).
+    let invite = null;
+    if (inviteToken) {
+      invite = await inviteService.getInvite(inviteToken);
+      if (invite.email.toLowerCase() !== email) {
+        throw new AppError("This invite was sent to a different email address.", 403);
+      }
     }
 
     const randomPassword = await bcrypt.hash(
@@ -542,22 +539,34 @@ const googleLogin = asyncHandler(async (req, res) => {
 
     user = await prisma.user.create({
       data: {
-        name: payload.name,
+        name: payload.name || email.split("@")[0],
         email,
         password: randomPassword,
-        role: invite.role,
-        organizationId: invite.orgId,
+        role: invite ? invite.role : "OWNER",
+        organizationId: invite ? invite.orgId : null,
+        provider: "google",
         isVerified: true,
       },
     });
 
-    await prisma.orgMembership.upsert({
-      where: { userId_orgId: { userId: user.id, orgId: invite.orgId } },
-      create: { userId: user.id, orgId: invite.orgId, role: invite.role },
-      update: { role: invite.role },
-    });
-
-    await seedDefaultPreferences(user.id, invite.orgId);
+    if (invite) {
+      await prisma.orgMembership.upsert({
+        where: { userId_orgId: { userId: user.id, orgId: invite.orgId } },
+        create: { userId: user.id, orgId: invite.orgId, role: invite.role },
+        update: { role: invite.role },
+      });
+      await prisma.teamInvite.updateMany({
+        where: { email, orgId: invite.orgId, acceptedAt: null },
+        data: { acceptedAt: new Date() },
+      });
+      await seedDefaultPreferences(user.id, invite.orgId);
+    } else {
+      const org = await createPersonalWorkspace(user, user.name, email);
+      await ensureTrialSubscription(user.id, org.id);
+      await seedDefaultPreferences(user.id, org.id);
+      // Reload so the token carries the new organizationId.
+      user = await prisma.user.findUnique({ where: { id: user.id } });
+    }
   }
 
   const session = await sessionService.createSession({

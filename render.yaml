@@ -3,6 +3,6 @@ services:
     name: uptoskills-backend
     runtime: node
     rootDir: backend
-    buildCommand: npm ci && npx prisma generate && npx prisma db push --skip-generate && node prisma/seed.js
+    buildCommand: npm ci && npx prisma generate && npx prisma migrate deploy
     startCommand: npm start
     healthCheckPath: /api/health

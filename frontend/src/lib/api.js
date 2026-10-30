@@ -160,7 +160,9 @@ export const unwrapList = (promise) =>
 
 // SSE helper for real-time streams.
 export const openEventStream = (path, { onEvent, onError, params = {} } = {}) => {
-  const url = new URL(baseURL + path);
+  // baseURL can be relative ("/api"), so resolve it against the current origin.
+  // If baseURL is already absolute, the second argument is ignored.
+  const url = new URL(baseURL + path, window.location.origin);
   const token = tokenStore.get();
   if (token) url.searchParams.set("token", token);
   for (const [k, v] of Object.entries(params)) {

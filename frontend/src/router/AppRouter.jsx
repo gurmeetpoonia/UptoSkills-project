@@ -1,6 +1,10 @@
 import React, { useLayoutEffect } from "react";
 import {
-  BrowserRouter, Routes, Route, Navigate, useLocation,
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  useLocation,
 } from "react-router-dom";
 import ErrorBoundary from "../ErrorBoundary";
 import { useAuth } from "@/context/AuthContext";
@@ -12,7 +16,6 @@ import Login from "../pages/Auth/Login";
 import AdminLogin from "../pages/Auth/AdminLogin";
 import AcceptInvite from "../pages/Auth/AcceptInvite";
 import Landing from "../pages/Landing/LandingPage";
-import PublicDemoDashboard from "../pages/PublicDemoDashboard";
 import DashboardLayout from "../components/layout/DashboardLayout";
 
 import Dashboard from "../pages/Dashboard/Dashboard";
@@ -30,7 +33,12 @@ import Reports from "../pages/Dashboard/Reports";
 import Integrations from "../pages/Dashboard/Integrations";
 import { ApiKeys, Webhooks } from "../pages/Dashboard/ApiKeys";
 import { Usage, Audit, Sessions, TwoFactor } from "../pages/Dashboard/Settings";
-import { Changelog, Onboarding, NotificationPreferences, DataExport } from "../pages/Dashboard/Extras";
+import {
+  Changelog,
+  Onboarding,
+  NotificationPreferences,
+  DataExport,
+} from "../pages/Dashboard/Extras";
 import AdminDashboard from "../pages/Dashboard/AdminDashboard";
 import AdminMainLayout from "../components/admin/AdminMainLayout";
 import AdminUsers from "../components/admin/AdminUsers";
@@ -66,33 +74,116 @@ import Notifications from "../components/Tools/Notifications/Notification";
 
 import InsightDashboard from "../modules/InsightDashboard/Insight";
 import {
-  OrganizationsList, AddOrganization, EditOrganization, OrganizationDetails,
+  OrganizationsList,
+  AddOrganization,
+  EditOrganization,
+  OrganizationDetails,
 } from "../modules/Organization";
 
 import CustomFields from "../pages/Dashboard/CustomFields";
 
 const ScrollToTop = () => {
   const { pathname } = useLocation();
-  useLayoutEffect(() => { window.scrollTo(0, 0); }, [pathname]);
+  useLayoutEffect(() => {
+    window.scrollTo(0, 0);
+  }, [pathname]);
   return null;
 };
 
+const RequireAuth = ({ children }) => {
+  const { isAuthenticated, loading } = useAuth();
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gray-50 dark:bg-gray-950">
+        <div className="h-12 w-12 animate-spin rounded-full border-4 border-teal-500 border-t-transparent" />
+      </div>
+    );
+  }
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  return children;
+};
+
+const RequireAdmin = ({ children }) => {
+  const { user, loading } = useAuth();
+  if (loading) return null;
+  if (user?.role !== "ADMIN") return <Navigate to="/" replace />;
+  return children;
+};
+
+// RootRedirect: Logged-in user goes to dashboard, logged-out gets Landing page
+const RootRedirect = () => {
+  const { isAuthenticated, loading, user } = useAuth();
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gray-50 dark:bg-gray-950">
+        <div className="h-12 w-12 animate-spin rounded-full border-4 border-teal-500 border-t-transparent" />
+      </div>
+    );
+  }
+  if (isAuthenticated) {
+    if (user?.role === "ADMIN") return <Navigate to="/admin/dashboard" replace />;
+    return <Navigate to="/dashboard" replace />;
+  }
+  return (
+    <ErrorBoundary>
+      <Landing />
+    </ErrorBoundary>
+  );
+};
+
 const App = () => (
-    <ChatProvider>
-      <BrowserRouter>
-        <ScrollToTop />
+  <ChatProvider>
+    <BrowserRouter>
+      <ScrollToTop />
       <Routes>
-        <Route path="/" element={<ErrorBoundary><RootRedirect /></ErrorBoundary>} />
+        {/* Pre-login & Auth Routes */}
+        <Route
+          path="/"
+          element={
+            <ErrorBoundary>
+              <RootRedirect />
+            </ErrorBoundary>
+          }
+        />
         <Route path="/login-gateway" element={<Navigate to="/login" replace />} />
-        <Route path="/login" element={<ErrorBoundary><Login /></ErrorBoundary>} />
-        <Route path="/demo-dashboard" element={<ErrorBoundary><PublicDemoDashboard /></ErrorBoundary>} />
+        <Route
+          path="/login"
+          element={
+            <ErrorBoundary>
+              <Login />
+            </ErrorBoundary>
+          }
+        />
         <Route path="/signup" element={<Navigate to="/login" replace />} />
         <Route path="/register" element={<Navigate to="/login" replace />} />
         <Route path="/reset-password" element={<Navigate to="/login" replace />} />
-        <Route path="/admin-login" element={<ErrorBoundary><AdminLogin /></ErrorBoundary>} />
-        <Route path="/invite/accept" element={<ErrorBoundary><AcceptInvite /></ErrorBoundary>} />
+        <Route
+          path="/admin-login"
+          element={
+            <ErrorBoundary>
+              <AdminLogin />
+            </ErrorBoundary>
+          }
+        />
+        <Route
+          path="/invite/accept"
+          element={
+            <ErrorBoundary>
+              <AcceptInvite />
+            </ErrorBoundary>
+          }
+        />
 
-        <Route element={<RequireAuth><ErrorBoundary><DashboardLayout /></ErrorBoundary></RequireAuth>}>
+        {/* Protected Dashboard Routes */}
+        <Route
+          element={
+            <RequireAuth>
+              <ErrorBoundary>
+                <DashboardLayout />
+              </ErrorBoundary>
+            </RequireAuth>
+          }
+        >
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/onboarding" element={<Onboarding />} />
 
@@ -101,8 +192,11 @@ const App = () => (
           <Route path="/insights/trend-analysis" element={<InsightDashboard />} />
           <Route path="/insights/feedback" element={<InsightDashboard />} />
 
-          {/* Legacy analytics dashboard route */}
-          <Route path="/analytics/dashboard" element={<Navigate to="/dashboard" replace />} />
+          {/* Legacy analytics redirect */}
+          <Route
+            path="/analytics/dashboard"
+            element={<Navigate to="/dashboard" replace />}
+          />
 
           {/* CRM */}
           <Route path="/leads" element={<Leads />} />
@@ -135,10 +229,22 @@ const App = () => (
           <Route path="/health-scores" element={<HealthScores />} />
           <Route path="/ai-insights" element={<AIInsights />} />
 
-          <Route path="/tools/email" element={<IntelHub defaultModule="email_intelligence" />} />
-          <Route path="/tools/domain" element={<IntelHub defaultModule="domain_intelligence" />} />
-          <Route path="/tools/database" element={<IntelHub defaultModule="person_search" />} />
-          <Route path="/tools/url" element={<IntelHub defaultModule="social_media_search" />} />
+          <Route
+            path="/tools/email"
+            element={<IntelHub defaultModule="email_intelligence" />}
+          />
+          <Route
+            path="/tools/domain"
+            element={<IntelHub defaultModule="domain_intelligence" />}
+          />
+          <Route
+            path="/tools/database"
+            element={<IntelHub defaultModule="person_search" />}
+          />
+          <Route
+            path="/tools/url"
+            element={<IntelHub defaultModule="social_media_search" />}
+          />
           <Route path="/tools/intel" element={<IntelHub />} />
 
           {/* Automation */}
@@ -163,17 +269,19 @@ const App = () => (
           {/* Account */}
           <Route path="/usage" element={<Usage />} />
           <Route path="/audit" element={<Audit />} />
-          <Route path="/notifications-prefs" element={<NotificationPreferences />} />
+          <Route
+            path="/notifications-prefs"
+            element={<NotificationPreferences />}
+          />
           <Route path="/data" element={<DataExport />} />
           <Route path="/settings" element={<Settings1 />} />
           <Route path="/settings/sessions" element={<Sessions />} />
           <Route path="/settings/2fa" element={<TwoFactor />} />
 
           <Route path="/notifications" element={<Notifications />} />
-          <Route path="/Maindashboard" element={<Navigate to="/dashboard" replace />} />
         </Route>
 
-        {/* Admin Dashboard with nested sub-pages */}
+        {/* Admin Dashboard */}
         <Route
           path="/admin"
           element={
@@ -193,47 +301,18 @@ const App = () => (
           <Route path="audit-logs" element={<AdminAuditLogs />} />
           <Route path="settings" element={<AdminSettings />} />
         </Route>
-        <Route path="/admin-dashboard" element={<Navigate to="/admin/dashboard" replace />} />
+        <Route
+          path="/admin-dashboard"
+          element={<Navigate to="/admin/dashboard" replace />}
+        />
 
+        {/* Catch-all fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <ChatBot />
       <CommandPalette />
     </BrowserRouter>
-    </ChatProvider>
+  </ChatProvider>
 );
-
-const RequireAuth = ({ children }) => {
-  const { isAuthenticated, loading } = useAuth();
-  if (loading) return (
-    <div className="flex h-screen items-center justify-center bg-gray-50 dark:bg-gray-950">
-      <div className="h-12 w-12 animate-spin rounded-full border-4 border-teal-500 border-t-transparent" />
-    </div>
-  );
-  if (!isAuthenticated) return <Navigate to="/login" replace />;
-  return children;
-};
-
-const RequireAdmin = ({ children }) => {
-  const { user, loading } = useAuth();
-  if (loading) return null;
-  if (user?.role !== "ADMIN") return <Navigate to="/" replace />;
-  return children;
-};
-
-const RootRedirect = () => {
-  const { isAuthenticated, loading, user } = useAuth();
-  if (loading) return (
-    <div className="flex h-screen items-center justify-center bg-gray-50 dark:bg-gray-950">
-      <div className="h-12 w-12 animate-spin rounded-full border-4 border-teal-500 border-t-transparent" />
-    </div>
-  );
-  if (isAuthenticated) {
-    // Role-based redirect: ADMIN users go to admin dashboard
-    if (user?.role === "ADMIN") return <Navigate to="/admin/dashboard" replace />;
-    return <Navigate to="/dashboard" replace />;
-  }
-  return <ErrorBoundary><PublicDemoDashboard /></ErrorBoundary>;
-};
 
 export default App;
