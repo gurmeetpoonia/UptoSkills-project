@@ -15,8 +15,8 @@ const Login = () => {
   const inviteToken = new URLSearchParams(inviteQuery).get("token");
   const { isAuthenticated, loading, refresh, user } = useAuth();
 
-  const [email, setEmail] = useState("demo@salesforge.com");
-  const [password, setPassword] = useState("Demo1234!");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
   const [signingIn, setSigningIn] = useState(false);
 
