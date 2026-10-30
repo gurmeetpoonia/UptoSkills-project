@@ -139,7 +139,7 @@ function Navbar() {
 
           {/* Get Started */}
           <Link
-            to="/login"
+            to="/demo-dashboard"
             className="px-6 py-2.5 bg-gradient-to-r from-violet-500 to-purple-600 text-white rounded-lg font-medium text-sm hover:scale-105 transition"
           >
             Get Started

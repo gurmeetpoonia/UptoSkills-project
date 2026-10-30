@@ -9,6 +9,7 @@ const { recordAudit } = require("../services/auditService");
 const { incrementUsage, enforcePlanLimit } = require("../services/usageService");
 const { publish } = require("../services/webhookService");
 const leadEnrichmentService = require("../services/leadEnrichmentService");
+const { enrollLeadInActiveCampaigns } = require("../services/campaignAutomationService");
 
 const LEAD_INCLUDE = {
   addedBy: { select: { id: true, name: true, email: true } },
@@ -95,6 +96,14 @@ const createLead = asyncHandler(async (req, res) => {
   // await updateLeadScore(lead.id);
   const updated = await prisma.lead.findUnique({ where: { id: lead.id }, include: LEAD_INCLUDE });
 
+  // Reconcile new leads before responding so a RUNNING campaign sees them
+  // immediately when their latest audience matches.
+  try {
+    await enrollLeadInActiveCampaigns(updated, req.orgId, req.user.id);
+  } catch (error) {
+    console.error("Failed to auto-enroll lead into campaigns:", error);
+  }
+  
   // ---------------------------------------------------------------------------
   // NOTIFICATION: Always notify the AUTHENTICATED USER who triggered this event.
   // userId must come from req.user.id (verified JWT session) — never from
@@ -351,9 +360,17 @@ const updateLead = asyncHandler(async (req, res) => {
     }).catch(console.error);
   }
 
-  // Re-score if engagement-related fields changed.
-  if (changes.some((c) => ["engagement", "source"].includes(c.field))) {
-    updateLeadScore(lead.id).catch(console.error);
+  // Re-score before campaign reconciliation so a By Score audience always
+  // uses the lead's latest calculated score.
+  const scoreNeedsRefresh = changes.some((c) =>
+    ["engagement", "source"].includes(c.field)
+  );
+  if (scoreNeedsRefresh) {
+    try {
+      await updateLeadScore(lead.id);
+    } catch (error) {
+      console.error("Failed to refresh lead score:", error);
+    }
   }
 
   recordAudit({
@@ -383,6 +400,11 @@ const updateLead = asyncHandler(async (req, res) => {
   }
 
   const refreshed = await prisma.lead.findUnique({ where: { id: lead.id }, include: LEAD_INCLUDE });
+
+  // Lead status/segment fields can change campaign membership. Reconcile the
+  // lead immediately against every RUNNING campaign using the latest audience.
+  await enrollLeadInActiveCampaigns(refreshed, req.orgId, req.user.id);
+
   return response.success(res, refreshed);
 });
 
@@ -427,6 +449,17 @@ const bulkUpdate = asyncHandler(async (req, res) => {
       skipDuplicates: true,
     });
   }
+
+  const updatedLeads = await prisma.lead.findMany({
+    where: { id: { in: ids.map(Number) }, orgId: req.orgId },
+    select: { id: true, email: true },
+  });
+  await Promise.all(
+    updatedLeads.map((lead) =>
+      enrollLeadInActiveCampaigns(lead, req.orgId, req.user.id)
+    )
+  );
+
   await recordAudit({
     userId: req.user.id,
     orgId: req.orgId,

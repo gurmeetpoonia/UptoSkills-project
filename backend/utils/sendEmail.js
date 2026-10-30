@@ -1,36 +1,88 @@
-const { Resend } = require("resend");
+const nodemailer = require("nodemailer");
 
-let resendClient = null;
+let smtpTransporter = null;
+let smtpVerificationPromise = null;
 
-const getResend = () => {
-  if (!process.env.RESEND_API_KEY) return null;
-  if (!resendClient) {
-    resendClient = new Resend(process.env.RESEND_API_KEY);
-  }
-  return resendClient;
+const getSmtpConfig = () => {
+  const user = String(process.env.SMTP_USER || process.env.EMAIL_USER || "").trim();
+  // Gmail App Passwords are sometimes copied with grouping whitespace.
+  // SMTP authentication expects the raw 16-character value.
+  const pass = String(process.env.SMTP_PASS || process.env.EMAIL_PASS || "").replace(/\s+/g, "");
+
+  return {
+    user,
+    pass,
+    host: process.env.SMTP_HOST || "smtp.gmail.com",
+    port: Number(process.env.SMTP_PORT || 465),
+    secure: String(process.env.SMTP_SECURE || "true") === "true",
+  };
 };
 
-const sendEmail = async ({ to, subject, html, text }) => {
-  const client = getResend();
+const getSmtpTransporter = () => {
+  const config = getSmtpConfig();
 
-  if (!client) {
+  if (!config.user || !config.pass) return null;
+
+  if (!smtpTransporter) {
+    smtpTransporter = nodemailer.createTransport({
+      host: config.host,
+      port: config.port,
+      secure: config.secure,
+      auth: {
+        user: config.user,
+        pass: config.pass,
+      },
+    });
+  }
+
+  return smtpTransporter;
+};
+
+const sendEmail = async ({ to, subject, html, text, from: requestedFrom }) => {
+  const transporter = getSmtpTransporter();
+
+  if (!transporter) {
     if (process.env.NODE_ENV !== "test") {
-      console.info(`[email:skipped] RESEND_API_KEY not set. ${subject} -> ${to}`);
+      const smtpConfig = getSmtpConfig();
+      console.info(
+        `[email:skipped] SMTP credentials not set. ${subject} -> ${to}`,
+        JSON.stringify({
+          userConfigured: Boolean(smtpConfig.user),
+          passConfigured: Boolean(smtpConfig.pass),
+          host: smtpConfig.host,
+          port: smtpConfig.port,
+        })
+      );
     }
     return { skipped: true };
   }
 
   try {
-    const from = process.env.EMAIL_FROM || "SalesForge <onboarding@resend.dev>";
-    const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
+    const smtpConfig = getSmtpConfig();
 
-    const { error } = await client.emails.send({
+    if (!smtpVerificationPromise) {
+      smtpVerificationPromise = transporter.verify().catch((verifyError) => {
+        smtpVerificationPromise = null;
+        throw verifyError;
+      });
+    }
+    await smtpVerificationPromise;
+    const from =
+      requestedFrom ||
+      process.env.EMAIL_FROM ||
+      `UptoSkills SalesForge <${smtpConfig.user}>`;
+
+    const frontendUrl = (
+      process.env.FRONTEND_URL || "http://localhost:5173"
+    ).replace(/\/$/, "");
+
+    const info = await transporter.sendMail({
       from,
       to,
       subject,
       html,
       text: text || subject,
-      reply_to: "support@salesforge.app",
+      replyTo: process.env.EMAIL_REPLY_TO || smtpConfig.user,
       headers: {
         "List-Unsubscribe": `<${frontendUrl}/notifications-prefs>`,
         "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
@@ -38,20 +90,30 @@ const sendEmail = async ({ to, subject, html, text }) => {
       },
     });
 
-    if (error) {
-      if (process.env.NODE_ENV !== "test") {
-        console.warn(`[email:error] ${subject} -> ${to}: ${error.message}`);
-      }
-      return { skipped: true, error: error.message };
-    }
-
-    return { skipped: false };
+    return {
+      skipped: false,
+      messageId: info.messageId,
+    };
   } catch (err) {
     if (process.env.NODE_ENV !== "test") {
-      console.warn(`[email:fallback] ${subject} -> ${to}: ${err.message}`);
+      console.warn(
+        `[email:error] ${subject} -> ${to}: ${err.message}`,
+        JSON.stringify({
+          code: err.code || null,
+          responseCode: err.responseCode || null,
+          command: err.command || null,
+          host: getSmtpConfig().host,
+          port: getSmtpConfig().port,
+          userConfigured: Boolean(getSmtpConfig().user),
+          passConfigured: Boolean(getSmtpConfig().pass),
+        })
+      );
     }
 
-    if (process.env.NODE_ENV === "production" && process.env.EMAIL_FAIL_HARD !== "false") {
+    if (
+      process.env.NODE_ENV === "production" &&
+      process.env.EMAIL_FAIL_HARD !== "false"
+    ) {
       throw err;
     }
 

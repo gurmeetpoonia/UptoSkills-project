@@ -10,8 +10,11 @@ router.use(protect, tenantScope);
 
 router.get("/metrics", ctrl.metrics);
 router.get("/optimization", ctrl.optimization);
-router.get("/", cacheMiddleware(30), ctrl.list);
+router.post("/audience-preview", ctrl.audiencePreview);
+router.post("/copy-preview", permit("OWNER", "ADMIN"), ctrl.copyPreview);
+router.get("/", ctrl.list);
 router.get("/:id", ctrl.get);
+router.get("/:id/leads", ctrl.getEnrolledLeads);
 router.post("/", permit("OWNER", "ADMIN"), ctrl.create);
 router.patch("/:id", permit("OWNER", "ADMIN"), ctrl.update);
 router.delete("/:id", permit("OWNER", "ADMIN"), ctrl.remove);

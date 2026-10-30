@@ -4,12 +4,20 @@ const { AppError } = require("../middleware/errorHandler");
 const asyncHandler = require("../utils/asyncHandler");
 const response = require("../utils/response");
 const { recordAudit } = require("../services/auditService");
+const { generateCampaignDraftOptions } = require("../services/aiEmailService");
 const { invalidateCache } = require("../utils/cache");
+const { personalizeCampaignEmail } = require("../services/aiEmailService");
+const {
+  getMatchingCampaignLeads,
+  getCampaignAudienceCount,
+  ensureCampaignSequence,
+  reconcileCampaignAudience,
+} = require("../services/campaignAutomationService");
 
 // Campaigns are stored using the existing Workflow model with JSON metadata.
 // This provides full campaign management without new schema.
 
-const CAMPAIGN_STATUSES = ["draft", "scheduled", "running", "paused", "completed", "cancelled"];
+const CAMPAIGN_STATUSES = ["draft", "scheduled", "running", "paused", "error", "completed", "cancelled"];
 const CAMPAIGN_TYPES = ["email", "sms", "social", "webhook", "multi_channel"];
 
 const list = asyncHandler(async (req, res) => {
@@ -22,7 +30,185 @@ const list = asyncHandler(async (req, res) => {
     prisma.workflow.findMany({ where, orderBy: { createdAt: "desc" }, skip, take: Number(limit) }),
     prisma.workflow.count({ where }),
   ]);
-  return response.paginated(res, items, total, page, limit);
+
+  // Expected audience size is always calculated from the latest campaign
+  // conditions, so the pre-launch UI never shows a stale recipient count.
+  const enrichedItems = await Promise.all(
+    items.map(async (campaign) => {
+      const conditions =
+        campaign.conditions &&
+        typeof campaign.conditions === "object"
+          ? campaign.conditions
+          : {};
+      const isScheduled = conditions.status === "scheduled" && !campaign.active;
+
+      if (!isScheduled) {
+        return {
+          ...campaign,
+          expectedLeads: null,
+          expectedLeadsPreview: [],
+        };
+      }
+
+      const expectedLeadsPreview = await getMatchingCampaignLeads(
+        conditions.audience,
+        req.orgId
+      );
+
+      return {
+        ...campaign,
+        expectedLeads: expectedLeadsPreview.length,
+        expectedLeadsPreview,
+      };
+    })
+  );
+
+  return response.paginated(res, enrichedItems, total, page, limit);
+});
+
+
+const copyPreview = asyncHandler(async (req, res) => {
+const {
+audience,
+campaignName,
+tone = "professional",
+goal = "replies",
+valueProp = "",
+prompt = ""
+} = req.body || {};
+
+if (!audience || typeof audience !== "object" || Array.isArray(audience))
+throw new AppError("A valid audience object is required.", 400);
+if (!["professional", "conversational", "concise"].includes(tone))
+throw new AppError("Choose a supported email tone.", 400);
+if (!["replies", "meetings", "awareness", "followup"].includes(goal))
+throw new AppError("Choose a supported campaign goal.", 400);
+if (typeof valueProp !== "string" || valueProp.length > 500)
+throw new AppError("Value proposition must be 500 characters or fewer.", 400);
+if (typeof prompt !== "string" || prompt.length > 1000)
+throw new AppError("Prompt must be 1000 characters or fewer.", 400);
+
+const matches = await getMatchingCampaignLeads(audience, req.orgId);
+const lead = matches[0] || {};
+const campaign = String(campaignName || "Sales outreach").trim().slice(0, 120);
+const audienceType = audience.type || "all";
+const audienceLabel = audience.label || campaign;
+const offer = valueProp.trim() || prompt.trim();
+const cta = {
+replies: "Would you be open to a brief conversation?",
+meetings: "Would you be available for a short meeting?",
+awareness: "Would you like me to share more information?",
+followup: "Would it be helpful to discuss the next step?"
+}[goal];
+
+let variants = [];
+let usedFallback = false;
+
+try {
+const drafts = [];
+const directions = [
+"Lead with a relevant benefit and simple call to action.",
+"Use a different concise angle and clear next step. Avoid clickbait."
+];
+
+for (let i = 0; i < directions.length; i++) {
+  const generated = await personalizeCampaignEmail({
+    name: lead.name,
+    company: lead.companyName || lead.company,
+    jobTitle: lead.jobTitle,
+    industry: lead.industry,
+    location: lead.location,
+    leadStatus: lead.status,
+    leadScore: lead.score,
+    campaignName: campaign,
+    campaignDescription: [
+      "Draft only. Do not send this email.",
+      "Tone: " + tone,
+      "Goal: " + goal,
+      offer ? "Owner-provided context: " + offer : "Do not invent a value proposition.",
+      directions[i]
+    ].join("\n"),
+    audienceLabel,
+    audienceType,
+    audienceContext: audience,
+    stepNumber: 1
+  });
+  drafts.push({ id: i + 1, subject: generated.subject, body: generated.body });
+}
+variants = drafts;
+
+} catch (error) {
+usedFallback = true;
+console.warn("[Campaign preview] AI unavailable; using local drafts:", error.message);
+
+const name = String(lead.name || "").trim();
+const company = String(lead.companyName || lead.company || "").trim();
+const greeting = name ? "Hi " + name + "," : "Hello,";
+const context = company ? " at " + company : "";
+const detail = offer || "I'd be glad to share relevant information and learn whether this could be useful to your team.";
+
+variants = [
+  {
+    id: 1,
+    subject: campaign + ": a possible next step",
+    body: [greeting, "", "I'm reaching out regarding " + campaign + context + ".", detail, "", cta, "", "Best regards"].join("\n")
+  },
+  {
+    id: 2,
+    subject: "A brief question about " + campaign,
+    body: [greeting, "", "I wanted to briefly connect about " + campaign + context + ".", offer ? "In particular, " + offer : "If relevant to your priorities, I can share a concise overview.", "", cta, "", "Best regards"].join("\n")
+  }
+];
+
+}
+
+return response.success(res, {
+variants,
+personalizedFor: lead.id ? {
+name: lead.name || null,
+company: lead.companyName || lead.company || null
+} : null,
+generationMode: usedFallback ? "template_fallback" : "gemini",
+note: usedFallback
+? "Gemini is unavailable. Two local template drafts were created; review them before sending."
+: lead.id
+? "Drafts personalized using one matching lead as a preview."
+: "No matching lead found; drafts use generic campaign context."
+});
+});
+
+const audiencePreview = asyncHandler(async (req, res) => {
+  const audience = req.body?.audience;
+  if (!audience || typeof audience !== "object" || Array.isArray(audience)) {
+    throw new AppError("A valid audience object is required.", 400);
+  }
+
+  const type = audience.type || "all";
+  if (!["all", "status", "tag", "score", "segment"].includes(type)) {
+    throw new AppError("Unsupported audience type.", 400);
+  }
+  if (type === "status" && !["new", "contacted", "qualified", "in_progress", "converted", "closed", "lost"].includes(audience.status)) {
+    throw new AppError("A valid lead status is required.", 400);
+  }
+  if (type === "tag" && (audience.tagId == null || audience.tagId === "" || !Number.isInteger(Number(audience.tagId)) || Number(audience.tagId) <= 0)) {
+    throw new AppError("A valid tag must be selected.", 400);
+  }
+  if (type === "segment" && (audience.savedSearchId == null || audience.savedSearchId === "" || !Number.isInteger(Number(audience.savedSearchId)) || Number(audience.savedSearchId) <= 0)) {
+    throw new AppError("A valid saved segment must be selected.", 400);
+  }
+  if (type === "score") {
+    const min = Number(audience.min);
+    const max = Number(audience.max);
+    if (audience.min == null || audience.max == null || !Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max > 100 || min > max) {
+      throw new AppError("Choose a valid score range from 0 to 100.", 400);
+    }
+  }
+
+  const leads = await getMatchingCampaignLeads(audience, req.orgId);
+  return response.success(res, {
+    count: leads.length,
+    sample: leads.slice(0, 5),
+  });
 });
 
 const get = asyncHandler(async (req, res) => {
@@ -35,8 +221,6 @@ const create = asyncHandler(async (req, res) => {
   const {
   name,
   description,
-  subject,
-  body,
   audience,
   steps,
   type = "email",
@@ -57,22 +241,20 @@ const create = asyncHandler(async (req, res) => {
       trigger: "SCHEDULED_TIME",
       conditions: {
   segment: segment || null,
-  subject: subject || steps?.[0]?.subject || "",
-  body: body || steps?.[0]?.body || "",
   audience: audience || "all",
-  steps: steps || [
-    {
-      day: 0,
-      subject: subject || "",
-      body: body || "",
-    },
-  ],
+  steps:
+    Array.isArray(steps) && steps.length > 0
+      ? steps.map(({ subject: _subject, body: _body, ...step }) => step)
+      : [{ day: 0 }],
   type,
   schedule: schedule || null,
+  status: schedule ? "scheduled" : "draft",
   budget: budget || null,
 },
       actions: content || [{ type: "SEND_EMAIL" }],
-      active: status === "running",
+      // A scheduled campaign must stay inactive until the scheduler reaches
+      // the latest conditions.schedule value. Never create enrollment early.
+      active: false,
     },
   });
   await recordAudit({ userId: req.user.id, orgId: req.orgId, action: "campaign.create", entityType: "Campaign", entityId: campaign.id, metadata: { name, type, status } });
@@ -82,54 +264,114 @@ const create = asyncHandler(async (req, res) => {
 
 const update = asyncHandler(async (req, res) => {
   const {
-  name,
-  description,
-  subject,
-  body,
-  audience,
-  steps,
-  status,
-  segment,
-  content,
-  budget,
+    name,
+    description,
+    audience,
+    steps,
+    status,
+    segment,
+    content,
+    budget,
+    schedule,
   } = req.body;
-  const campaign = await prisma.workflow.findFirst({ where: { id: Number(req.params.id), orgId: req.orgId } });
+
+  const campaign = await prisma.workflow.findFirst({
+    where: { id: Number(req.params.id), orgId: req.orgId },
+  });
   if (!campaign) throw new AppError("Campaign not found.", 404);
+
+  const currentConditions =
+    typeof campaign.conditions === "object" && campaign.conditions
+      ? campaign.conditions
+      : {};
+  const nextConditions = { ...currentConditions };
+  const audienceChanged = audience !== undefined;
+  let scheduleChanged = false;
+
+  if (name !== undefined) campaign.name = name;
   const data = {};
   if (name !== undefined) data.name = name;
   if (description !== undefined) data.description = description;
-  if (status !== undefined) data.active = status === "running";
-  if (
-  segment !== undefined ||
-  budget !== undefined ||
-  subject !== undefined ||
-  body !== undefined ||
-  audience !== undefined ||
-  steps !== undefined
-  ) {
-  const existingConditions =
-    (typeof campaign.conditions === "object" && campaign.conditions)
-      ? campaign.conditions
-      : {};
-  if (segment !== undefined)
-    existingConditions.segment = segment;
-  if (budget !== undefined)
-    existingConditions.budget = budget;
-  if (subject !== undefined)
-    existingConditions.subject = subject;
-  if (body !== undefined)
-  existingConditions.body = body;
-  if (steps !== undefined)
-  existingConditions.steps = steps;
-  if (audience !== undefined)
-    existingConditions.audience = audience;
-  data.conditions = existingConditions;
-  }
   if (content !== undefined) data.actions = content;
+
+  if (segment !== undefined) nextConditions.segment = segment;
+  if (budget !== undefined) nextConditions.budget = budget;
+  // Manual email subject/body are no longer campaign configuration.
+  // Gemini generates both values per lead when the sequence runs.
+  delete nextConditions.subject;
+  delete nextConditions.body;
+
+  if (steps !== undefined) {
+    nextConditions.steps =
+      Array.isArray(steps) && steps.length > 0
+        ? steps.map(({ subject: _subject, body: _body, ...step }) => step)
+        : [{ day: 0 }];
+  }
+  if (audience !== undefined) nextConditions.audience = audience;
+
+  if (schedule !== undefined) {
+    const scheduledAt = schedule ? new Date(schedule) : null;
+    if (schedule && (!scheduledAt || Number.isNaN(scheduledAt.getTime()))) {
+      throw new AppError("A valid campaign schedule date and time is required.", 400);
+    }
+    nextConditions.schedule = scheduledAt ? scheduledAt.toISOString() : null;
+    scheduleChanged = true;
+  }
+
+  const wasRunning = campaign.active && currentConditions.status === "running";
+  const nextSchedule = nextConditions.schedule ? new Date(nextConditions.schedule) : null;
+
+  // Editing a scheduled campaign must never activate it early. The latest
+  // schedule remains the source of truth for the scheduler.
+  const configurationChanged =
+    audienceChanged ||
+    segment !== undefined ||
+    budget !== undefined ||
+    steps !== undefined ||
+    scheduleChanged;
+
+  if (!wasRunning && scheduleChanged) {
+    data.active = false;
+    nextConditions.status = nextSchedule ? "scheduled" : "draft";
+    delete nextConditions.autoPaused;
+    delete nextConditions.lastError;
+    delete nextConditions.errorAt;
+  } else if (!wasRunning && currentConditions.status === "error" && configurationChanged) {
+    // A configuration change is the explicit recovery action for a failed
+    // scheduled campaign. Clear the saved error and return it to scheduling.
+    data.active = false;
+    nextConditions.status = nextSchedule ? "scheduled" : "draft";
+    delete nextConditions.autoPaused;
+    delete nextConditions.lastError;
+    delete nextConditions.errorAt;
+  } else if (status !== undefined && wasRunning) {
+    data.active = status === "running";
+    nextConditions.status = status;
+  } else if (status !== undefined && !scheduleChanged) {
+    data.active = status === "running";
+    nextConditions.status = status;
+  }
+
+  if (
+    audienceChanged ||
+    segment !== undefined ||
+    budget !== undefined ||
+    steps !== undefined ||
+    scheduleChanged ||
+    status !== undefined
+  ) {
+    data.conditions = nextConditions;
+  }
+
   await prisma.workflow.update({ where: { id: campaign.id }, data });
+
+  if (audienceChanged && wasRunning) {
+    await reconcileCampaignAudience(campaign.id, req.orgId, req.user.id);
+  }
+
   invalidateCache("/campaigns");
   return response.success(res, { message: "Campaign updated." });
-  });
+});
 
 const remove = asyncHandler(async (req, res) => {
   const result = await prisma.workflow.deleteMany({ where: { id: Number(req.params.id), orgId: req.orgId } });
@@ -138,120 +380,168 @@ const remove = asyncHandler(async (req, res) => {
   return response.success(res, { message: "Campaign deleted." });
 });
 
-const launch = asyncHandler(async (req, res) => {
-  const campaign = await prisma.workflow.findFirst({
-    where: {
-      id: Number(req.params.id),
-      orgId: req.orgId,
+const activateCampaign = async ({
+  campaign,
+  orgId,
+  userId,
+  allowPastSchedule = false,
+}) => {
+  if (!campaign) throw new AppError("Campaign not found.", 404);
+
+  // Re-read the workflow immediately before activation. This makes the
+  // database's latest conditions.schedule and audience the source of truth,
+  // even when the scheduler picked up an older snapshot.
+  const latestCampaign = await prisma.workflow.findFirst({
+    where: { id: campaign.id, orgId },
+  });
+  if (!latestCampaign) throw new AppError("Campaign not found.", 404);
+
+  const conditions =
+    typeof latestCampaign.conditions === "object" && latestCampaign.conditions
+      ? latestCampaign.conditions
+      : {};
+
+  if (conditions.status === "running" && latestCampaign.active) {
+    return {
+      alreadyRunning: true,
+      scheduledAt: conditions.schedule || null,
+      enrolled: 0,
+    };
+  }
+
+  const scheduledAt = conditions.schedule ? new Date(conditions.schedule) : null;
+
+  if (!scheduledAt || Number.isNaN(scheduledAt.getTime())) {
+    throw new AppError("A valid campaign schedule date and time is required.", 400);
+  }
+
+  if (!allowPastSchedule && scheduledAt.getTime() < Date.now()) {
+    throw new AppError("Campaign schedule must be in the future.", 400);
+  }
+
+  // Email subject/body are generated by Gemini per lead at send time.
+  // They are intentionally NOT required for campaign activation.
+  // Keep at least one sequence step so a valid campaign can enroll leads
+  // and let the worker generate the actual email content.
+  const rawCampaignSteps =
+    Array.isArray(conditions.steps) && conditions.steps.length > 0
+      ? conditions.steps
+      : [{ day: 0 }];
+
+  // Gemini owns campaign email content. Strip any legacy/manual subject/body
+  // fields before sequence creation so old campaigns cannot reintroduce a
+  // removed template requirement.
+  const campaignSteps = rawCampaignSteps.map((step) => {
+    if (!step || typeof step !== "object") return { day: 0 };
+    const { subject: _subject, body: _body, ...stepWithoutEmailContent } = step;
+    return stepWithoutEmailContent;
+  });
+
+  // Sequence creation happens only at activation time. A scheduled campaign
+  // therefore has no SequenceEnrollment records before its start time.
+  const sequence = await ensureCampaignSequence({
+    campaign: latestCampaign,
+    orgId,
+    userId: userId || latestCampaign.userId,
+    steps: campaignSteps,
+  });
+
+  // Read the audience after reading the latest workflow, so audience edits made
+  // before the scheduled time are applied to the real enrollment set.
+  const leads = await getMatchingCampaignLeads(conditions.audience, orgId);
+
+  for (const lead of leads) {
+    const existingEnrollment = await prisma.sequenceEnrollment.findUnique({
+      where: { sequenceId_leadId: { sequenceId: sequence.id, leadId: lead.id } },
+    });
+
+    if (existingEnrollment) {
+      // Completed/replied/bounced/stopped history is never deleted or rewritten.
+      if (existingEnrollment.status === "PAUSED") {
+        await prisma.sequenceEnrollment.update({
+          where: { id: existingEnrollment.id },
+          data: { status: "ACTIVE", nextRunAt: scheduledAt, email: lead.email },
+        });
+      }
+      continue;
+    }
+
+    await prisma.sequenceEnrollment.create({
+      data: {
+        orgId,
+        sequenceId: sequence.id,
+        leadId: lead.id,
+        email: lead.email,
+        status: "ACTIVE",
+        currentStep: 0,
+        steps: campaignSteps,
+        startedAt: scheduledAt,
+        nextRunAt: scheduledAt,
+      },
+    });
+  }
+
+  await prisma.workflow.update({
+    where: { id: latestCampaign.id },
+    data: {
+      active: true,
+      conditions: {
+        ...conditions,
+        status: "running",
+        schedule: scheduledAt.toISOString(),
+        autoPaused: false,
+        lastError: null,
+      },
     },
   });
 
-  if (!campaign) {
-    throw new AppError("Campaign not found.", 404);
-  }
+  invalidateCache("/campaigns");
 
-  if (campaign.conditions?.status === "running") {
-  throw new AppError("Campaign is already running.", 400);
-}
+  return {
+    alreadyRunning: false,
+    scheduledAt: scheduledAt.toISOString(),
+    enrolled: leads.length,
+  };
+};
+
+const launch = asyncHandler(async (req, res) => {
+  const campaign = await prisma.workflow.findFirst({
+    where: { id: Number(req.params.id), orgId: req.orgId },
+  });
+  if (!campaign) throw new AppError("Campaign not found.", 404);
 
   const conditions =
     typeof campaign.conditions === "object" && campaign.conditions
       ? campaign.conditions
       : {};
+  const scheduledAt = conditions.schedule ? new Date(conditions.schedule) : null;
 
-  const subject = conditions.subject || "";
-  const body = conditions.body || "";
-  const audience = conditions.audience || "all";
-
-  const campaignSteps = Array.isArray(conditions.steps)
-  ? conditions.steps
-  : [
-      {
-        day: 0,
-        subject,
-        body,
-      },
-    ];
-
-
-
-
-  if (!subject) {
-    throw new AppError("Campaign subject is required.", 400);
+  if (!scheduledAt || Number.isNaN(scheduledAt.getTime())) {
+    throw new AppError("A valid campaign schedule date and time is required.", 400);
   }
-
-  if (!body) {
-    throw new AppError("Campaign email body is required.", 400);
+  if (scheduledAt.getTime() < Date.now()) {
+    throw new AppError("Campaign schedule must be in the future.", 400);
   }
-
-  // Get leads for this campaign
-  let leads;
-
-  if (audience === "all") {
-    leads = await prisma.lead.findMany({
-  where: {
-    orgId: req.orgId,
-  },
-  select: {
-    id: true,
-    name: true,
-    email: true,
-  },
-});
-  } else {
-    throw new AppError(
-      "Only the 'all' audience is currently supported.",
-      400
-    );
-  }
-
-  if (leads.length === 0) {
-    throw new AppError("No leads with email addresses found.", 400);
-  }
-  const sequence = await prisma.sequence.create({
-  data: {
-    orgId: req.orgId,
-    userId: req.user.id,
-    name: `Campaign: ${campaign.name}`,
-    description: campaign.description || null,
-    status: "ACTIVE",
-    steps: campaignSteps,
-  },
-});
-
-  // Create an enrollment for each lead
-  for (const lead of leads) {
-  await prisma.sequenceEnrollment.create({
-    data: {
-      sequenceId: sequence.id,
-      leadId: lead.id,
-      email: lead.email,
-      status: "ACTIVE",
-      currentStep: 0,
-      steps: campaignSteps,
-      nextRunAt: new Date(),
-    },
-  });
-}
 
   await prisma.workflow.update({
-  where: { id: campaign.id },
-  data: {
-    active: true,
-    conditions: {
-      ...conditions,
-      status: "running",
+    where: { id: campaign.id },
+    data: {
+      active: false,
+      conditions: {
+        ...conditions,
+        status: "scheduled",
+        autoPaused: false,
+        lastError: null,
+      },
     },
-    runCount: { increment: 1 },
-    lastRunAt: new Date(),
-  },
-});
+  });
 
   invalidateCache("/campaigns");
 
   return response.success(res, {
-    message: "Campaign launched.",
-    enrolled: leads.length,
+    message: "Campaign scheduled.",
+    scheduledAt: scheduledAt.toISOString(),
+    enrolled: 0,
   });
 });
 
@@ -642,7 +932,83 @@ const optimization = asyncHandler(async (req, res) => {
     generatedAt: new Date(),
   });
 });
+const getEnrolledLeads = asyncHandler(async (req, res) => {
+  const campaign = await prisma.workflow.findFirst({
+    where: { id: Number(req.params.id), orgId: req.orgId },
+  });
+  if (!campaign) throw new AppError("Campaign not found.", 404);
+
+  const sequence = await prisma.sequence.findFirst({
+    where: {
+      OR: [
+        { workflowId: campaign.id },
+        { orgId: req.orgId, name: `Campaign: ${campaign.name}` },
+      ],
+    },
+  });
+
+  if (!sequence) {
+    return response.success(res, { campaignName: campaign.name, leads: [] });
+  }
+
+  const enrollments = await prisma.sequenceEnrollment.findMany({
+    where: { sequenceId: sequence.id },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const leadIds = enrollments.map((e) => e.leadId).filter(Boolean);
+  const leads = leadIds.length
+    ? await prisma.lead.findMany({
+        where: { id: { in: leadIds } },
+        select: { id: true, name: true, email: true, status: true, companyName: true },
+      })
+    : [];
+  const leadById = new Map(leads.map((l) => [l.id, l]));
+
+  const result = enrollments.map((enrollment) => {
+    const lead = enrollment.leadId ? leadById.get(enrollment.leadId) : null;
+    return {
+      enrollmentId: enrollment.id,
+      leadId: enrollment.leadId,
+      name: lead?.name || null,
+      email: enrollment.email,
+      companyName: lead?.companyName || null,
+      leadStatus: lead?.status || null,
+      enrollmentStatus: enrollment.status,
+      currentStep: enrollment.currentStep,
+      totalSteps: Array.isArray(enrollment.steps) ? enrollment.steps.length : 0,
+      startedAt: enrollment.startedAt,
+      completedAt: enrollment.completedAt,
+    };
+  });
+
+  return response.success(res, { campaignName: campaign.name, leads: result });
+});
+
+const generateDrafts = asyncHandler(async (req, res) => {
+  const { campaignName, prompt, tone, goal, valueProposition, audienceLabel, lead } = req.body || {};
+  if (typeof prompt !== "string" || prompt.trim().length < 3) {
+    throw new AppError("Enter a prompt or a few keywords before generating drafts.", 400);
+  }
+  if (prompt.length > 4000) throw new AppError("Campaign prompt must be 4,000 characters or fewer.", 400);
+  const drafts = await generateCampaignDraftOptions({
+    campaignName: String(campaignName || "").slice(0, 160),
+    prompt: prompt.trim(),
+    tone,
+    goal,
+    valueProposition: String(valueProposition || "").slice(0, 1000),
+    audienceLabel: String(audienceLabel || "").slice(0, 200),
+    lead: lead && typeof lead === "object" ? lead : null,
+  });
+  return response.success(res, { drafts });
+});
+
+
 module.exports = {
+  copyPreview,
+  generateDrafts,
+  audiencePreview,
+  activateCampaign,
   list,
   get,
   create,
@@ -654,6 +1020,7 @@ module.exports = {
   stop,
   metrics,
   optimization,
+  getEnrolledLeads,
   CAMPAIGN_STATUSES,
   CAMPAIGN_TYPES
 };

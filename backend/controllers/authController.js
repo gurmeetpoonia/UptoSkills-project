@@ -91,7 +91,16 @@ const seedDefaultPreferences = async (userId, orgId = null) => {
 };
 
 const register = asyncHandler(async (req, res) => {
-  const email = req.body.email.toLowerCase();
+  const email = req.body.email.trim().toLowerCase();
+
+  // FIN-TECH is a private shared workspace: new accounts must be invited.
+  if (!req.body.inviteToken) {
+    throw new AppError(
+      "FIN-TECH accounts are invite-only. Ask your workspace owner for an invitation.",
+      403
+    );
+  }
+
   const password = await bcrypt.hash(req.body.password, 12);
 
   const existing = await prisma.user.findUnique({ where: { email } });
@@ -493,7 +502,7 @@ const deleteAccount = asyncHandler(async (req, res) => {
 });
 
 const googleLogin = asyncHandler(async (req, res) => {
-  const { credential } = req.body;
+  const { credential, inviteToken } = req.body;
 
   if (!credential) {
     throw new AppError("Google credential is required.", 400);
@@ -513,44 +522,42 @@ const googleLogin = asyncHandler(async (req, res) => {
   });
 
   if (!user) {
+    // Google sign-in must not create an unrestricted public workspace.
+    if (!inviteToken) {
+      throw new AppError(
+        "FIN-TECH accounts are invite-only. Open your team invitation before signing in with Google.",
+        403
+      );
+    }
+
+    const invite = await inviteService.getInvite(inviteToken);
+    if (invite.email.toLowerCase() !== email) {
+      throw new AppError("This invite was sent to a different email address.", 403);
+    }
+
     const randomPassword = await bcrypt.hash(
       crypto.randomBytes(32).toString("hex"),
       12
     );
-
-    const org = await prisma.organization.create({
-      data: {
-        name: `${payload.name}'s Workspace`,
-        slug: `${slugify(payload.name)}-${Date.now()}`,
-        region: "Global",
-        type: "Startup",
-        contactName: payload.name,
-        contactEmail: email,
-        plan: "FREE",
-        status: "TRIALING",
-        trialEndsAt: new Date(
-          Date.now() + 14 * 24 * 60 * 60 * 1000
-        ),
-      },
-    });
 
     user = await prisma.user.create({
       data: {
         name: payload.name,
         email,
         password: randomPassword,
-        role: "OWNER",
-        organization: { connect: { id: org.id } },
+        role: invite.role,
+        organizationId: invite.orgId,
         isVerified: true,
       },
     });
 
-    await prisma.orgMembership.create({
-      data: { userId: user.id, orgId: org.id, role: "OWNER" },
+    await prisma.orgMembership.upsert({
+      where: { userId_orgId: { userId: user.id, orgId: invite.orgId } },
+      create: { userId: user.id, orgId: invite.orgId, role: invite.role },
+      update: { role: invite.role },
     });
 
-    // Seed default notification preferences for the new Google user.
-    await seedDefaultPreferences(user.id, org.id);
+    await seedDefaultPreferences(user.id, invite.orgId);
   }
 
   const session = await sessionService.createSession({

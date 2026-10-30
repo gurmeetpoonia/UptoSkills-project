@@ -7,8 +7,10 @@
  *   SMTP_HOST     – SMTP server hostname  (default: smtp.gmail.com)
  *   SMTP_PORT     – SMTP port             (default: 587)
  *   SMTP_SECURE   – "true" for TLS/465    (default: false → STARTTLS)
- *   EMAIL_USER    – SMTP login / sender address
- *   EMAIL_PASS    – SMTP password / app-password
+ *   SMTP_USER     – SMTP login / sender address
+ *   SMTP_PASS     – SMTP password / app-password
+ *   EMAIL_USER    – legacy alias for SMTP_USER
+ *   EMAIL_PASS    – legacy alias for SMTP_PASS
  *   EMAIL_FROM    – Friendly "From" header  (default: "SalesForge Notifications <EMAIL_USER>")
  *
  * The Resend fallback has been removed; if you later want Resend set RESEND_API_KEY
@@ -16,6 +18,9 @@
  */
 
 const nodemailer = require("nodemailer");
+const {
+  personalizeCampaignEmail,
+} = require("./aiEmailService");
 
 let _transporter = null;
 
@@ -24,7 +29,10 @@ let _transporter = null;
  * Returns null if SMTP credentials are not configured.
  */
 const getTransporter = () => {
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+  const user = process.env.SMTP_USER || process.env.EMAIL_USER;
+  const pass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
+
+  if (!user || !pass) {
     return null;
   }
 
@@ -34,8 +42,8 @@ const getTransporter = () => {
       port:   parseInt(process.env.SMTP_PORT || "587", 10),
       secure: process.env.SMTP_SECURE === "true", // true → TLS (port 465), false → STARTTLS (587)
       auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
+        user,
+        pass,
       },
       // Prevent connection pool exhaustion on slow networks
       pool:             true,
@@ -63,12 +71,13 @@ const send = async ({ to, subject, html, text }) => {
   const transporter = getTransporter();
 
   if (!transporter) {
-    console.warn("[EmailService] SMTP not configured (EMAIL_USER / EMAIL_PASS missing). Skipping email to:", to);
+    console.warn("[EmailService] SMTP not configured (SMTP_USER / SMTP_PASS missing). Skipping email to:", to);
     return false;
   }
 
+  const sender = process.env.SMTP_USER || process.env.EMAIL_USER;
   const from = process.env.EMAIL_FROM ||
-    `"SalesForge Notifications" <${process.env.EMAIL_USER}>`;
+    `"SalesForge Notifications" <${sender}>`;
 
   const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
 
@@ -80,7 +89,7 @@ const send = async ({ to, subject, html, text }) => {
       html,
       text: text || subject,
       // Reply-To avoids no-reply pattern which raises spam score
-      replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_USER,
+      replyTo: process.env.EMAIL_REPLY_TO || sender,
       headers: {
         // List-Unsubscribe is required by Gmail/Yahoo for bulk senders
         "List-Unsubscribe":      `<${frontendUrl}/notifications-prefs>`,
@@ -141,9 +150,114 @@ const verifyConnection = async () => {
     return false;
   }
 };
+/**
+ * Sends a campaign email to a lead.
+ *
+ * @param {object} opts
+ * @param {object} opts.lead
+ * @param {object} opts.campaign
+ * @param {object} opts.enrollment
+ * @returns {Promise<boolean>}
+ */
+const sendCampaignEmail = async ({ lead, campaign, enrollment }) => {
+const recipientEmail = lead?.email || enrollment?.email;
 
+if (!recipientEmail) {
+console.warn("[EmailService] Campaign email skipped: recipient email missing.");
+return false;
+}
+
+try {
+const audience = campaign?.conditions?.audience || {};
+const audienceType = audience?.type || "all";
+const audienceLabel = audience?.label || campaign?.name || "General Leads";
+const currentStep = Array.isArray(enrollment?.steps)
+? enrollment.steps[enrollment.currentStep]
+: null;
+
+const approvedAction = Array.isArray(campaign?.actions)
+  ? campaign.actions.find((action) => action?.type === "SEND_EMAIL") || campaign.actions[0]
+  : null;
+
+const selectedDraft = approvedAction?.subject && approvedAction?.body
+  ? { subject: approvedAction.subject, body: approvedAction.body }
+  : null;
+
+let generated;
+
+try {
+  generated = await personalizeCampaignEmail({
+    name: lead.name,
+    company: lead.companyName,
+    jobTitle: lead.jobTitle,
+    industry: lead.industry,
+    location: lead.location,
+    leadStatus: lead.status,
+    leadScore: lead.score,
+    campaignName: campaign.name,
+    campaignDescription: campaign.description,
+    audienceLabel,
+    audienceType,
+    audienceContext: audience,
+    selectedDraft,
+    stepNumber: (enrollment.currentStep || 0) + 1,
+  });
+} catch (aiError) {
+  console.warn(
+    "[EmailService] AI unavailable; using local template:",
+    aiError.message || aiError
+  );
+}
+
+if (!generated?.subject || !generated?.body) {
+  const name = String(lead.name || "").trim();
+  const company = String(lead.companyName || lead.company || "").trim();
+  const campaignName = String(campaign?.name || "our campaign").trim();
+  const greeting = name ? "Hi " + name + "," : "Hello,";
+  const context = company ? " at " + company : "";
+  const detail = String(campaign?.description || "").trim();
+
+  const subject = selectedDraft?.subject || ("Following up: " + campaignName);
+  const body = selectedDraft?.body || [
+    greeting,
+    "",
+    "I'm reaching out regarding " + campaignName + context + ".",
+    detail || "I'd be glad to share more information and learn whether this may be relevant to your team.",
+    "",
+    "Would you be open to a brief conversation?",
+    "",
+    "Best regards"
+  ].join("\n");
+
+  generated = { subject, body };
+  console.log("[EmailService] Using fallback email template for campaign preview/send.");
+}
+
+const escapeHtml = (value) => String(value)
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;")
+  .replace(/'/g, "&#39;");
+
+return await send({
+  to: recipientEmail,
+  subject: generated.subject,
+  html: escapeHtml(generated.body).replace(/\r?\n/g, "<br>"),
+  text: generated.body,
+});
+
+} catch (error) {
+console.error(
+"[EmailService] Campaign email send failed:",
+error.message || error
+);
+return false;
+}
+};
 module.exports = {
   send,
   sendNotificationEmail,
   verifyConnection,
+  sendCampaignEmail,
 };

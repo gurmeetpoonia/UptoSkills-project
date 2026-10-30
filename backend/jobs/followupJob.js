@@ -1,17 +1,22 @@
 // Background jobs. All time-based work runs in a single scheduler with safety guards
 // so a slow iteration never overlaps the next one.
 const cron = require("node-cron");
-const crypto = require("crypto");
 const { prisma } = require("../config/postgres");
-const { sendEmail } = require("../utils/sendEmail");
-const { generateTracking } = require("../controllers/emailTrackingController");
-const { personalizeCampaignEmail } = require("../services/aiEmailService");
+const { AppError } = require("../middleware/errorHandler");
+const { sendCampaignEmail } = require("../services/emailService");
 const { createInAppNotification } = require("../services/notificationService");
 const { recordAudit } = require("../services/auditService");
 const logger = require("../utils/logger");
+const { activateCampaign } = require("../controllers/campaignController");
+const { leadMatchesAudience } = require("../services/campaignAutomationService");
 
+const isPermanentCampaignConfigurationError = (error) =>
+  Number.isInteger(error?.statusCode) &&
+  error.statusCode >= 400 &&
+  error.statusCode < 500;
 
 let running = false;
+let schedulerInterval = null;
 
 const tasks = {
   // Every minute: nudge new leads that haven't been contacted.
@@ -22,9 +27,7 @@ const tasks = {
       include: { addedBy: true },
     });
     for (const lead of leads) {
-
       try {
-
         await createInAppNotification({
           userId: lead.addedById,
           orgId: lead.orgId,
@@ -41,265 +44,289 @@ const tasks = {
     }
     if (leads.length) logger.info("job.followup", { count: leads.length });
   },
+
   async processSequenceEnrollments() {
-    const now = new Date();
+    const BATCH_SIZE = Math.max(1, Number(process.env.CAMPAIGN_EMAIL_BATCH_SIZE || 100));
+    let totalProcessed = 0;
 
-    const enrollments = await prisma.sequenceEnrollment.findMany({
-  where: {
-    status: "ACTIVE",
-    nextRunAt: {
-      lte: now,
-    },
-  },
-  take: 50,
+    // Recover enrollments stranded by a crash/restart between the claim step
+    // and the final update.
+    const stranded = await prisma.sequenceEnrollment.updateMany({
+      where: {
+        status: "ACTIVE",
+        nextRunAt: null,
+        updatedAt: { lt: new Date(Date.now() - 5 * 60 * 1000) },
+      },
+      data: { nextRunAt: new Date() },
+    });
+    if (stranded.count) {
+      logger.warn("job.sequence.recovered_stranded", { count: stranded.count });
+    }
 
-});
+    // Process due enrollments in batches until the queue is empty.
+    while (true) {
+      const now = new Date();
 
-    for (const enrollment of enrollments) {
-
-      try {
-
-        const claimed = await prisma.sequenceEnrollment.updateMany({
-          where: {
-            id: enrollment.id,
-            status: "ACTIVE",
-            nextRunAt: {
-              lte: now,
+      const enrollments = await prisma.sequenceEnrollment.findMany({
+        where: {
+          status: "ACTIVE",
+          nextRunAt: { lte: now },
+        },
+        orderBy: { id: "asc" },
+        take: BATCH_SIZE,
+        include: {
+          sequence: {
+            select: {
+              orgId: true,
+              workflowId: true,
+              workflow: {
+                select: {
+                  id: true,
+                  active: true,
+                  trigger: true,
+                  conditions: true,
+                  name: true,
+                  description: true,
+                  actions: true,
+                },
+              },
             },
           },
-          data: {
-            nextRunAt: null,
+          lead: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              status: true,
+              source: true,
+              assignedToId: true,
+              companyName: true,
+              jobTitle: true,
+              industry: true,
+              location: true,
+              score: true,
+              tags: {
+                select: {
+                  tagId: true,
+                },
+              },
+            },
           },
-        });
+        },
+      });
 
-        if (claimed.count !== 1) {
-          continue;
-        }
-        const stopEvent = await prisma.emailEvent.findFirst({
-          where: {
-            orgId: enrollment.orgId,
-            recipient: enrollment.email,
-            type: { in: ["BOUNCED", "REPLIED"] },
-          },
-          orderBy: { createdAt: "desc" },
-        });
+      if (enrollments.length === 0) break;
 
-        if (stopEvent) {
-          const stopStatus = stopEvent.type === "BOUNCED" ? "BOUNCED" : "REPLIED";
-
-          await prisma.sequenceEnrollment.update({
-            where: { id: enrollment.id },
+      for (const enrollment of enrollments) {
+        try {
+          const claimed = await prisma.sequenceEnrollment.updateMany({
+            where: {
+              id: enrollment.id,
+              status: "ACTIVE",
+              nextRunAt: {
+                lte: now,
+              },
+            },
             data: {
-              status: stopStatus,
               nextRunAt: null,
             },
           });
 
-          logger.info("job.sequence.stopped", {
-            enrollmentId: enrollment.id,
-            email: enrollment.email,
-            reason: stopEvent.type,
-          });
-
-          continue;
-        }
-        const steps = enrollment.steps;
-
-        if (!Array.isArray(steps) || steps.length === 0) {
-          await prisma.sequenceEnrollment.update({
-            where: { id: enrollment.id },
-            data: { status: "COMPLETED" },
-          });
-          continue;
-        }
-
-        const currentStep = steps[enrollment.currentStep];
-
-        if (!currentStep) {
-          await prisma.sequenceEnrollment.update({
-            where: { id: enrollment.id },
-            data: { status: "COMPLETED" },
-          });
-          continue;
-        }
-
-     let firstName = "there";
-let lead = null;
-
-if (enrollment.leadId) {
-  lead = await prisma.lead.findUnique({
-  where: { id: enrollment.leadId },
-  select: {
-    name: true,
-    companyName: true,
-    jobTitle: true,
-    industry: true,
-    location: true,
-  },
-});
-
-          if (lead?.name) {
-            firstName = lead.name.split(" ")[0];
+          if (claimed.count !== 1) {
+            continue;
           }
-        }
 
-        let body = currentStep.body.replace(
-  /{{first_name}}/gi,
-  firstName
-);
-
-
-
-try {
-  const personalized = await personalizeCampaignEmail({
-    name: lead?.name || firstName,
-    company: lead?.companyName || "",
-    jobTitle: lead?.jobTitle || "",
-    industry: lead?.industry || "",
-    location: lead?.location || "",
-    originalBody: body,
-  });
-
-  if (personalized?.output) {
-    body = personalized.output;
-  }
-} catch (error) {
-  logger.warn("job.sequence.ai_personalization_failed", {
-    enrollmentId: enrollment.id,
-    err: error.message,
-  });
-}
-
-        const messageId = crypto.randomUUID();
-
-        const tracking = generateTracking(
-          enrollment.orgId,
-          messageId,
-          enrollment.email
-        );
-
-        const trackedBody = body.replace(
-          /href=["']([^"']+)["']/gi,
-          (match, url) => {
-            if (!/^https?:\/\//i.test(url)) {
-              return match;
-            }
-
-            const tracked = `${tracking.trackedLinks.length
-              ? tracking.trackedLinks.find((link) => link.label === url)?.url
-              : null}`;
-
-            return tracked ? `href="${tracked}"` : match;
+          // Live re-check of audience conditions before sending
+          const campaign = enrollment.sequence.workflow;
+          if (
+            !campaign ||
+            !campaign.active ||
+            campaign.trigger !== "SCHEDULED_TIME" ||
+            campaign.conditions?.status !== "running" ||
+            !enrollment.leadId ||
+            !(await leadMatchesAudience(
+              enrollment.lead,
+              campaign.conditions?.audience,
+              enrollment.sequence.orgId
+            ))
+          ) {
+            await prisma.sequenceEnrollment.update({
+              where: { id: enrollment.id },
+              data: { status: "PAUSED", nextRunAt: null },
+            });
+            continue;
           }
-        );
 
-        const trackedHtml = `${trackedBody}
-<img src="${tracking.openUrl}" width="1" height="1" style="display:none;" alt="" />`;
+          const stopEvent = await prisma.emailEvent.findFirst({
+            where: {
+              orgId: enrollment.sequence.orgId,
+              recipient: enrollment.email,
+              type: { in: ["BOUNCED", "REPLIED"] },
+            },
+            orderBy: { createdAt: "desc" },
+          });
 
-        const sendResult = await sendEmail({
-          to: enrollment.email,
-          subject: currentStep.subject,
-          html: trackedHtml,
-        });
+          if (stopEvent) {
+            const stopStatus = stopEvent.type === "BOUNCED" ? "BOUNCED" : "REPLIED";
 
-        if (sendResult.skipped) {
-          logger.warn("job.sequence.email_skipped", {
+            await prisma.sequenceEnrollment.update({
+              where: { id: enrollment.id },
+              data: {
+                status: stopStatus,
+                nextRunAt: null,
+              },
+            });
+
+            logger.info("job.sequence.stopped", {
+              enrollmentId: enrollment.id,
+              email: enrollment.email,
+              reason: stopEvent.type,
+            });
+
+            continue;
+          }
+
+          const steps = enrollment.steps;
+          if (!Array.isArray(steps) || steps.length === 0) {
+            await prisma.sequenceEnrollment.update({
+              where: { id: enrollment.id },
+              data: { status: "COMPLETED" },
+            });
+            continue;
+          }
+
+          const currentStep = steps[enrollment.currentStep];
+          if (!currentStep) {
+            await prisma.sequenceEnrollment.update({
+              where: { id: enrollment.id },
+              data: { status: "COMPLETED" },
+            });
+            continue;
+          }
+
+          logger.info("job.sequence.email_sending", {
             enrollmentId: enrollment.id,
             email: enrollment.email,
             step: enrollment.currentStep,
-            error: sendResult.error || "Email was skipped",
           });
 
-          // Keep the enrollment on the current step.
-          // Retry on the next scheduler run.
-          await prisma.sequenceEnrollment.update({
-            where: { id: enrollment.id },
-            data: {
-              nextRunAt: new Date(Date.now() + 15 * 60 * 1000),
-            },
+          // Call the Gemini-powered sender
+          const sent = await sendCampaignEmail({
+            lead: enrollment.lead,
+            campaign,
+            enrollment,
           });
 
-          continue;
-        }
+          if (!sent) {
+            logger.warn("job.sequence.email_failed_or_skipped", {
+              enrollmentId: enrollment.id,
+              email: enrollment.email,
+              step: enrollment.currentStep,
+            });
 
-        await prisma.emailEvent.create({
-  data: {
-    orgId: enrollment.orgId,
-    type: "SENT",
-    recipient: enrollment.email,
-    subject: currentStep.subject,
-    messageId,
-    metadata: {
-      enrollmentId: enrollment.id,
-      sequenceId: enrollment.sequenceId,
-      step: enrollment.currentStep,
-    },
-  },
-});
+            const retryMinutes = Math.max(1, Number(process.env.CAMPAIGN_AI_RETRY_MINUTES || 3));
+            await prisma.sequenceEnrollment.updateMany({
+              where: { id: enrollment.id, status: "ACTIVE" },
+              data: { nextRunAt: new Date(Date.now() + retryMinutes * 60 * 1000) },
+            });
 
-        const nextStepIndex = enrollment.currentStep + 1;
-        const nextStep = steps[nextStepIndex];
-
-        if (!nextStep) {
-          await prisma.sequenceEnrollment.update({
-            where: { id: enrollment.id },
-            data: {
-              status: "COMPLETED",
-              currentStep: nextStepIndex,
-              nextRunAt: null,
-            },
-          });
-        } else {
-          const nextRunAt = new Date(
-            enrollment.startedAt.getTime() +
-            nextStep.day * 24 * 60 * 60 * 1000
-          );
-
-          if (nextStep.time) {
-            const [hours, minutes] = String(nextStep.time)
-              .split(":")
-              .map(Number);
-
-            if (
-              Number.isInteger(hours) &&
-              Number.isInteger(minutes) &&
-              hours >= 0 &&
-              hours <= 23 &&
-              minutes >= 0 &&
-              minutes <= 59
-            ) {
-              nextRunAt.setHours(hours, minutes, 0, 0);
-            }
+            continue;
           }
 
-          await prisma.sequenceEnrollment.update({
-            where: { id: enrollment.id },
+          // Record sent event
+          await prisma.emailEvent.create({
             data: {
-              currentStep: nextStepIndex,
-              nextRunAt,
+              orgId: enrollment.sequence.orgId,
+              type: "SENT",
+              recipient: enrollment.email,
+              subject: campaign.name || "Campaign Email",
+              messageId: `${Date.now()}-${enrollment.id}`,
             },
           });
+
+          // Calculate next step
+          const nextStepIndex = enrollment.currentStep + 1;
+          const nextStep = steps[nextStepIndex];
+
+          if (!nextStep) {
+            await prisma.sequenceEnrollment.update({
+              where: { id: enrollment.id },
+              data: {
+                status: "COMPLETED",
+                currentStep: nextStepIndex,
+                nextRunAt: null,
+                completedAt: new Date(),
+              },
+            });
+          } else {
+            const nextRunAt = new Date(
+              enrollment.startedAt.getTime() +
+                nextStep.day * 24 * 60 * 60 * 1000
+            );
+
+            if (nextStep.time) {
+              const [hours, minutes] = String(nextStep.time)
+                .split(":")
+                .map(Number);
+
+              if (
+                Number.isInteger(hours) &&
+                Number.isInteger(minutes) &&
+                hours >= 0 &&
+                hours <= 23 &&
+                minutes >= 0 &&
+                minutes <= 59
+              ) {
+                nextRunAt.setHours(hours, minutes, 0, 0);
+              }
+            }
+
+            await prisma.sequenceEnrollment.update({
+              where: { id: enrollment.id },
+              data: {
+                currentStep: nextStepIndex,
+                nextRunAt,
+              },
+            });
+          }
+
+          logger.info("job.sequence.email_sent", {
+            enrollmentId: enrollment.id,
+            email: enrollment.email,
+            step: enrollment.currentStep,
+          });
+        } catch (e) {
+          logger.error("job.sequence.error", {
+            enrollmentId: enrollment.id,
+            err: e.message,
+          });
+
+          try {
+            await prisma.sequenceEnrollment.updateMany({
+              where: { id: enrollment.id, status: "ACTIVE", nextRunAt: null },
+              data: { nextRunAt: new Date(Date.now() + 5 * 60 * 1000) },
+            });
+          } catch (releaseErr) {
+            logger.error("job.sequence.release_failed", {
+              enrollmentId: enrollment.id,
+              err: releaseErr.message,
+            });
+          }
         }
-
-        logger.info("job.sequence.email_sent", {
-          enrollmentId: enrollment.id,
-          email: enrollment.email,
-          step: enrollment.currentStep,
-        });
-      } catch (e) {
-        logger.error("job.sequence.error", {
-          enrollmentId: enrollment.id,
-          err: e.message,
-        });
       }
-    }
 
-    if (enrollments.length) {
-      logger.info("job.sequence", {
+      totalProcessed += enrollments.length;
+      logger.info("job.sequence.batch", {
         count: enrollments.length,
+        totalProcessed,
       });
     }
+
+    if (totalProcessed) {
+      logger.info("job.sequence", { count: totalProcessed });
+    }
   },
+
   // Daily at 02:00: log a snapshot of platform metrics.
   async dailySnapshot() {
     const [users, orgs, leads, deals, activeSubs] = await Promise.all([
@@ -318,14 +345,183 @@ try {
   },
 };
 
+const activateDueCampaigns = async () => {
+  const now = new Date();
+
+  const campaigns = await prisma.workflow.findMany({
+    where: {
+      active: false,
+      trigger: "SCHEDULED_TIME",
+    },
+    orderBy: {
+      id: "asc",
+    },
+  });
+
+  for (const campaign of campaigns) {
+    try {
+      const conditions =
+        campaign.conditions &&
+        typeof campaign.conditions === "object"
+          ? campaign.conditions
+          : {};
+
+      if (
+        conditions.status === "running" ||
+        conditions.status === "completed" ||
+        conditions.status === "cancelled" ||
+        conditions.status === "paused" ||
+        conditions.status === "error"
+      ) {
+        continue;
+      }
+
+      if (!conditions.schedule) {
+        if (conditions.status === "scheduled") {
+          throw new AppError(
+            "A valid campaign schedule date and time is required.",
+            400
+          );
+        }
+        continue;
+      }
+
+      const scheduledAt = new Date(conditions.schedule);
+
+      if (Number.isNaN(scheduledAt.getTime())) {
+        throw new AppError(
+          "A valid campaign schedule date and time is required.",
+          400
+        );
+      }
+
+      if (scheduledAt.getTime() > now.getTime()) {
+        continue;
+      }
+
+      const result = await activateCampaign({
+        campaign,
+        orgId: campaign.orgId,
+        userId: campaign.userId,
+        allowPastSchedule: true,
+      });
+
+      logger.info("job.campaign.auto_activated", {
+        campaignId: campaign.id,
+        campaignName: campaign.name,
+        scheduledAt: result.scheduledAt,
+        enrolled: result.enrolled,
+      });
+    } catch (e) {
+      logger.error("job.campaign.auto_activation_error", {
+        campaignId: campaign.id,
+        campaignName: campaign.name,
+        err: e.message,
+      });
+
+      try {
+        const current = await prisma.workflow.findFirst({
+          where: { id: campaign.id, orgId: campaign.orgId },
+        });
+        if (current) {
+          const permanent = isPermanentCampaignConfigurationError(e);
+          await prisma.workflow.update({
+            where: { id: campaign.id },
+            data: {
+              active: false,
+              conditions: {
+                ...(current.conditions || {}),
+                ...(permanent ? { status: "error", errorAt: new Date().toISOString() } : {}),
+                lastError: e.message,
+              },
+            },
+          });
+
+          logger[permanent ? "warn" : "error"](
+            permanent
+              ? "job.campaign.auto_activation_configuration_error"
+              : "job.campaign.auto_activation_retryable_error",
+            {
+              campaignId: campaign.id,
+              campaignName: campaign.name,
+              err: e.message,
+            }
+          );
+        }
+      } catch (updateErr) {
+        logger.error("job.campaign.auto_activation_error_state_failed", {
+          campaignId: campaign.id,
+          err: updateErr.message,
+        });
+      }
+    }
+  }
+};
+
+// Mark a running campaign complete once every enrollment has reached a terminal state.
+// Empty enrollment sets are deliberately ignored so campaigns with no matching leads
+// are not reported as completed accidentally.
+const reconcileCompletedCampaigns = async () => {
+  const campaigns = await prisma.workflow.findMany({
+    where: { trigger: "SCHEDULED_TIME", active: true },
+    include: {
+      sequence: {
+        include: { enrollments: { select: { status: true } } },
+      },
+    },
+  });
+
+  const terminalStatuses = new Set(["COMPLETED", "STOPPED", "REPLIED", "BOUNCED"]);
+
+  for (const campaign of campaigns) {
+    const conditions =
+      campaign.conditions && typeof campaign.conditions === "object"
+        ? campaign.conditions
+        : {};
+    const enrollments = campaign.sequence?.enrollments || [];
+
+    if (
+      conditions.status !== "running" ||
+      enrollments.length === 0 ||
+      !enrollments.every((enrollment) => terminalStatuses.has(enrollment.status))
+    ) {
+      continue;
+    }
+
+    await prisma.workflow.update({
+      where: { id: campaign.id },
+      data: {
+        active: false,
+        conditions: {
+          ...conditions,
+          status: "completed",
+          completedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    await prisma.sequence.update({
+      where: { id: campaign.sequence.id },
+      data: { status: "ARCHIVED" },
+    });
+
+    logger.info("job.campaign.completed", {
+      campaignId: campaign.id,
+      campaignName: campaign.name,
+      enrollmentCount: enrollments.length,
+    });
+  }
+};
+
 const run = async () => {
   if (running) return;
   running = true;
 
   try {
-
+    await activateDueCampaigns();
     await tasks.followupNewLeads();
     await tasks.processSequenceEnrollments();
+    await reconcileCompletedCampaigns();
   } catch (e) {
     logger.error("job.tick.error", { err: e.message });
   } finally {
@@ -334,13 +530,26 @@ const run = async () => {
 };
 
 const start = () => {
-  if (process.env.DISABLE_CRON === "true") return;
-  cron.schedule("* * * * *", run);
+  if (process.env.DISABLE_CRON === "true") {
+    logger.warn("jobs.disabled", { reason: "DISABLE_CRON=true" });
+    return;
+  }
+
+  void run();
+
+  if (!schedulerInterval) {
+    schedulerInterval = setInterval(() => {
+      void run();
+    }, 5_000);
+    schedulerInterval.unref?.();
+  }
+
   cron.schedule("0 2 * * *", tasks.dailySnapshot);
-  logger.info("jobs.scheduled");
+
+  logger.info("jobs.scheduled", {
+    campaignScheduler: "5s-interval",
+    startupCatchUp: true,
+  });
 };
 
 module.exports = { start, tasks };
-
-
-

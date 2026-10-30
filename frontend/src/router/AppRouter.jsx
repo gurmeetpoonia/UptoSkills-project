@@ -12,6 +12,7 @@ import Login from "../pages/Auth/Login";
 import AdminLogin from "../pages/Auth/AdminLogin";
 import AcceptInvite from "../pages/Auth/AcceptInvite";
 import Landing from "../pages/Landing/LandingPage";
+import PublicDemoDashboard from "../pages/PublicDemoDashboard";
 import DashboardLayout from "../components/layout/DashboardLayout";
 
 import Dashboard from "../pages/Dashboard/Dashboard";
@@ -84,6 +85,7 @@ const App = () => (
         <Route path="/" element={<ErrorBoundary><RootRedirect /></ErrorBoundary>} />
         <Route path="/login-gateway" element={<Navigate to="/login" replace />} />
         <Route path="/login" element={<ErrorBoundary><Login /></ErrorBoundary>} />
+        <Route path="/demo-dashboard" element={<ErrorBoundary><PublicDemoDashboard /></ErrorBoundary>} />
         <Route path="/signup" element={<Navigate to="/login" replace />} />
         <Route path="/register" element={<Navigate to="/login" replace />} />
         <Route path="/reset-password" element={<Navigate to="/login" replace />} />
@@ -231,7 +233,7 @@ const RootRedirect = () => {
     if (user?.role === "ADMIN") return <Navigate to="/admin/dashboard" replace />;
     return <Navigate to="/dashboard" replace />;
   }
-  return <ErrorBoundary><Landing /></ErrorBoundary>;
+  return <ErrorBoundary><PublicDemoDashboard /></ErrorBoundary>;
 };
 
 export default App;
