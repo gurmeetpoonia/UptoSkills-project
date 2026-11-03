@@ -90,45 +90,8 @@ const seedDefaultPreferences = async (userId, orgId = null) => {
   });
 };
 
-// Personal workspace so a new user can start using the product immediately.
-const createPersonalWorkspace = async (user, name, email) => {
-  const slug = `${slugify(name)}-${user.id}`;
-  const org = await prisma.organization.create({
-    data: {
-      name: `${name}'s workspace`,
-      slug,
-      region: "Global",
-      type: "Startup",
-      contactName: name,
-      contactEmail: email,
-      plan: "FREE",
-      status: "TRIALING",
-      trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-    },
-  });
-  await prisma.user.update({ where: { id: user.id }, data: { organizationId: org.id, role: "OWNER" } });
-  await prisma.orgMembership.create({
-    data: { userId: user.id, orgId: org.id, role: "OWNER" },
-  });
-  return org;
-};
-
-const ensureTrialSubscription = (userId, orgId) =>
-  prisma.subscription.upsert({
-    where: { orgId },
-    create: {
-      orgId,
-      userId,
-      plan: "FREE",
-      status: "TRIALING",
-      trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-    },
-    update: {},
-  });
-
 const register = asyncHandler(async (req, res) => {
-  const email = req.body.email.trim().toLowerCase();
-
+  const email = req.body.email.toLowerCase();
   const password = await bcrypt.hash(req.body.password, 12);
 
   const existing = await prisma.user.findUnique({ where: { email } });
@@ -186,7 +149,25 @@ const register = asyncHandler(async (req, res) => {
       data: { acceptedAt: new Date() },
     });
   } else {
-    await createPersonalWorkspace(user, req.body.name.trim(), email);
+    // Create personal workspace so the user can start using the product immediately.
+    const slug = `${slugify(req.body.name)}-${user.id}`;
+    const org = await prisma.organization.create({
+      data: {
+        name: `${req.body.name.trim()}'s workspace`,
+        slug,
+        region: "Global",
+        type: "Startup",
+        contactName: req.body.name.trim(),
+        contactEmail: email,
+        plan: "FREE",
+        status: "TRIALING",
+        trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+      },
+    });
+    await prisma.user.update({ where: { id: user.id }, data: { organizationId: org.id, role: "OWNER" } });
+    await prisma.orgMembership.create({
+      data: { userId: user.id, orgId: org.id, role: "OWNER" },
+    });
   }
 
   // Auto-accept any other pending invites matching this email.
@@ -197,7 +178,17 @@ const register = asyncHandler(async (req, res) => {
   await seedDefaultPreferences(user.id, finalUser.organizationId);
 
   if (user.organizationId) {
-    await ensureTrialSubscription(user.id, user.organizationId);
+    await prisma.subscription.upsert({
+      where: { orgId: user.organizationId },
+      create: {
+        orgId: user.organizationId,
+        userId: user.id,
+        plan: "FREE",
+        status: "TRIALING",
+        trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+      },
+      update: {},
+    });
   }
 
   await dispatchNotification({
@@ -502,7 +493,7 @@ const deleteAccount = asyncHandler(async (req, res) => {
 });
 
 const googleLogin = asyncHandler(async (req, res) => {
-  const { credential, inviteToken } = req.body;
+  const { credential } = req.body;
 
   if (!credential) {
     throw new AppError("Google credential is required.", 400);
@@ -522,51 +513,44 @@ const googleLogin = asyncHandler(async (req, res) => {
   });
 
   if (!user) {
-    // New Google user: join the invited org if an invite token is present,
-    // otherwise get a personal workspace (same as email/password signup).
-    let invite = null;
-    if (inviteToken) {
-      invite = await inviteService.getInvite(inviteToken);
-      if (invite.email.toLowerCase() !== email) {
-        throw new AppError("This invite was sent to a different email address.", 403);
-      }
-    }
-
     const randomPassword = await bcrypt.hash(
       crypto.randomBytes(32).toString("hex"),
       12
     );
 
+    const org = await prisma.organization.create({
+      data: {
+        name: `${payload.name}'s Workspace`,
+        slug: `${slugify(payload.name)}-${Date.now()}`,
+        region: "Global",
+        type: "Startup",
+        contactName: payload.name,
+        contactEmail: email,
+        plan: "FREE",
+        status: "TRIALING",
+        trialEndsAt: new Date(
+          Date.now() + 14 * 24 * 60 * 60 * 1000
+        ),
+      },
+    });
+
     user = await prisma.user.create({
       data: {
-        name: payload.name || email.split("@")[0],
+        name: payload.name,
         email,
         password: randomPassword,
-        role: invite ? invite.role : "OWNER",
-        organizationId: invite ? invite.orgId : null,
-        provider: "google",
+        role: "OWNER",
+        organization: { connect: { id: org.id } },
         isVerified: true,
       },
     });
 
-    if (invite) {
-      await prisma.orgMembership.upsert({
-        where: { userId_orgId: { userId: user.id, orgId: invite.orgId } },
-        create: { userId: user.id, orgId: invite.orgId, role: invite.role },
-        update: { role: invite.role },
-      });
-      await prisma.teamInvite.updateMany({
-        where: { email, orgId: invite.orgId, acceptedAt: null },
-        data: { acceptedAt: new Date() },
-      });
-      await seedDefaultPreferences(user.id, invite.orgId);
-    } else {
-      const org = await createPersonalWorkspace(user, user.name, email);
-      await ensureTrialSubscription(user.id, org.id);
-      await seedDefaultPreferences(user.id, org.id);
-      // Reload so the token carries the new organizationId.
-      user = await prisma.user.findUnique({ where: { id: user.id } });
-    }
+    await prisma.orgMembership.create({
+      data: { userId: user.id, orgId: org.id, role: "OWNER" },
+    });
+
+    // Seed default notification preferences for the new Google user.
+    await seedDefaultPreferences(user.id, org.id);
   }
 
   const session = await sessionService.createSession({

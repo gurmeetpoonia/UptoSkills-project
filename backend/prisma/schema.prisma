@@ -765,6 +765,7 @@ model SequenceEnrollment {
   email       String
   status      EnrollmentStatus @default(ACTIVE)
   currentStep Int              @default(0)
+  retryCount  Int              @default(0)
   steps       Json
   nextRunAt   DateTime?
   startedAt   DateTime         @default(now())
@@ -1404,6 +1405,7 @@ enum EnrollmentStatus {
   STOPPED
   REPLIED
   BOUNCED
+  FAILED
 }
 
 enum WorkflowTrigger {

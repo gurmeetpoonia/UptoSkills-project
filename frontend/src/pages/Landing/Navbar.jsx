@@ -82,6 +82,7 @@ function Navbar() {
       } border-b backdrop-blur-xl`}
     >
       <div className="max-w-7xl mx-auto px-6 py-4 flex items-center">
+        
         {/* LEFT - Logo */}
         <div className="flex-1 flex justify-start">
           <Link to="/" className="flex items-center gap-2">
@@ -118,9 +119,10 @@ function Navbar() {
 
         {/* RIGHT - Actions */}
         <div className="flex-1 flex justify-end items-center gap-4">
+          
           {/* Theme Toggle */}
           <div>
-            <ThemeToggle />
+            <ThemeToggle/>
           </div>
 
           {/* Login */}
@@ -135,7 +137,7 @@ function Navbar() {
             Log in
           </Link>
 
-          {/* Get Started -> points to /login */}
+          {/* Get Started */}
           <Link
             to="/login"
             className="px-6 py-2.5 bg-gradient-to-r from-violet-500 to-purple-600 text-white rounded-lg font-medium text-sm hover:scale-105 transition"
@@ -143,7 +145,7 @@ function Navbar() {
             Get Started
           </Link>
 
-          {/* Mobile Menu Toggle Button */}
+          {/* Mobile Menu Toggle Button (BULLETPROOF SVG ICON) */}
           <button
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
             className={`md:hidden p-2 rounded-md transition-colors focus:outline-none ${
@@ -179,8 +181,8 @@ function Navbar() {
                 key={i}
                 href={link.href}
                 className={`block px-4 py-3 text-base font-semibold rounded-lg transition-colors duration-200 ${
-                  darkMode
-                    ? "text-gray-100 hover:bg-slate-800"
+                  darkMode 
+                    ? "text-gray-100 hover:bg-slate-800" 
                     : "text-gray-900 hover:bg-gray-200"
                 }`}
                 onClick={() => setMobileMenuOpen(false)}

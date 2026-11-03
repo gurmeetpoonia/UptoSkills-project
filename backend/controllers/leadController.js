@@ -389,7 +389,7 @@ const updateLead = asyncHandler(async (req, res) => {
 
   const refreshed = await prisma.lead.findUnique({ where: { id: lead.id }, include: LEAD_INCLUDE });
 
-  // [FIX ITEM 6]: enrollLeadInActiveCampaigns is wrapped safely so errors never fail the lead update response
+  // Campaign re-enrollment is best-effort: a failure here must not fail the lead update.
   await safeEnrollLead(refreshed, req.orgId, req.user.id);
 
   return response.success(res, refreshed);
@@ -442,7 +442,7 @@ const bulkUpdate = asyncHandler(async (req, res) => {
     select: { id: true, email: true },
   });
 
-  // [FIX ITEM 6]: Promise.all settled safely so any single enrollment failure doesn't 500 bulkUpdate
+  // Best-effort as well: one failed enrollment must not turn a successful bulk update into a 500.
   await Promise.allSettled(
     updatedLeads.map((lead) =>
       safeEnrollLead(lead, req.orgId, req.user.id)

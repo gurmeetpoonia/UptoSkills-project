@@ -227,18 +227,14 @@ const tasks = {
               step: enrollment.currentStep,
             });
 
-            // [FIX ITEM 7]: Track retries with exponential backoff & fail after limit
+            // Retry with increasing backoff, then give up and mark the enrollment FAILED.
             const currentRetries = Number(enrollment.retryCount || 0) + 1;
             const baseRetryMinutes = Math.max(1, Number(process.env.CAMPAIGN_AI_RETRY_MINUTES || 3));
 
             if (currentRetries >= MAX_CAMPAIGN_RETRY_ATTEMPTS) {
-              await prisma.sequenceEnrollment.update({
-                where: { id: enrollment.id },
-                data: {
-                  status: "FAILED",
-                  nextRunAt: null,
-                  ...(enrollment.retryCount !== undefined ? { retryCount: currentRetries } : {}),
-                },
+              await prisma.sequenceEnrollment.updateMany({
+                where: { id: enrollment.id, status: "ACTIVE" },
+                data: { status: "FAILED", nextRunAt: null, retryCount: currentRetries },
               });
 
               logger.error("job.sequence.enrollment_failed_permanently", {
@@ -248,13 +244,13 @@ const tasks = {
                 maxAllowed: MAX_CAMPAIGN_RETRY_ATTEMPTS,
               });
             } else {
-              // Backoff delay: e.g., 3m, 6m, 9m
-              const backoffMinutes = baseRetryMinutes * currentRetries;
+              // 3m, 6m, 12m, ... capped at 60 minutes.
+              const backoffMinutes = Math.min(baseRetryMinutes * 2 ** (currentRetries - 1), 60);
               await prisma.sequenceEnrollment.updateMany({
                 where: { id: enrollment.id, status: "ACTIVE" },
                 data: {
                   nextRunAt: new Date(Date.now() + backoffMinutes * 60 * 1000),
-                  ...(enrollment.retryCount !== undefined ? { retryCount: currentRetries } : {}),
+                  retryCount: currentRetries,
                 },
               });
 
@@ -292,6 +288,7 @@ const tasks = {
                 currentStep: nextStepIndex,
                 nextRunAt: null,
                 completedAt: new Date(),
+                retryCount: 0,
               },
             });
           } else {
@@ -322,6 +319,7 @@ const tasks = {
               data: {
                 currentStep: nextStepIndex,
                 nextRunAt,
+                retryCount: 0,
               },
             });
           }
@@ -495,7 +493,7 @@ const activateDueCampaigns = async () => {
 };
 
 // Mark a running campaign complete once every enrollment has reached a terminal state.
-// [FIX ITEM 7]: Added FAILED to terminalStatuses so failed leads do not lock the campaign forever
+// FAILED is terminal too, so permanently failed enrollments do not keep a campaign running forever.
 const reconcileCompletedCampaigns = async () => {
   const campaigns = await prisma.workflow.findMany({
     where: { trigger: "SCHEDULED_TIME", active: true },

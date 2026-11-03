@@ -49,6 +49,8 @@ Then open `http://localhost:8080`.
 
 The current Prisma schema contains substantially more tables and enum values than the historical migration directory. Until a clean production migration baseline is regenerated against the intended database, `prisma db push` is the reliable way to provision a fresh database from the checked-in schema. Do not run destructive schema commands against a production database without a backup.
 
+`prisma db push` is meant for fresh local databases only. Deployments must use `npx prisma migrate deploy`.
+
 ## Environment
 
 The backend needs `DATABASE_URL` and `JWT_SECRET`. Redis is required for BullMQ-backed functionality. Email, Google, Firebase, AI, and other integrations are optional until their corresponding features are used.
