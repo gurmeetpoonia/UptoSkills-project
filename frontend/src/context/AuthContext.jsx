@@ -10,7 +10,6 @@ import React, {
 import {
   api,
   clearAuthState,
-  tokenStore,
   orgStore,
   unwrap,
   userStore,
@@ -80,7 +79,6 @@ export const AuthProvider = ({ children }) => {
       try {
         const data = await unwrap(api.post("/auth/register", payload));
 
-        if (data?.token) tokenStore.set(data.token);
         setUser(data.user);
         userStore.set(data.user);
 

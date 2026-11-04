@@ -108,8 +108,7 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
           DIRECT_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
           SHADOW_DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_shadow_test
-        run: |
-          npx prisma migrate deploy || npx prisma db push --skip-generate --accept-data-loss
+        run: npx prisma migrate deploy
 
       - name: Seed database
         working-directory: backend

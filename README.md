@@ -1,6 +1,4 @@
-# SalesForge — merged project
-
-This repository is the merged SalesForge application combining the FIN-TECH and UptoSkills variants.
+# SalesForge
 
 ## Stack
 - Frontend: React + Vite
@@ -20,10 +18,10 @@ This repository is the merged SalesForge application combining the FIN-TECH and 
 npm run install:all
 ```
 
-4. Bring the current Prisma schema into the database:
+4. Apply the Prisma migrations to an empty database:
 
 ```bash
-npm run db:push
+cd backend && npx prisma migrate deploy
 ```
 
 5. Start the backend and frontend in separate terminals:
@@ -37,7 +35,7 @@ The Vite development server proxies `/api` to `http://localhost:3000` by default
 
 ## Docker verification setup
 
-The included Compose file provisions PostgreSQL and Redis and uses `prisma db push` against a fresh database before starting the backend:
+The included Compose file provisions PostgreSQL and Redis, runs `npx prisma migrate deploy` and starts the backend:
 
 ```bash
 docker compose up --build
@@ -45,11 +43,20 @@ docker compose up --build
 
 Then open `http://localhost:8080`.
 
-### Why `db push` is used here
+## Database migrations
 
-The current Prisma schema contains substantially more tables and enum values than the historical migration directory. Until a clean production migration baseline is regenerated against the intended database, `prisma db push` is the reliable way to provision a fresh database from the checked-in schema. Do not run destructive schema commands against a production database without a backup.
+`npx prisma migrate deploy` works on an empty PostgreSQL database. The migration `20260920000000_baseline_current_schema` brings the early schema (first three migrations) up to the current one.
 
-`prisma db push` is meant for fresh local databases only. Deployments must use `npx prisma migrate deploy`.
+A database that was originally created with `prisma db push` already has these objects. Do not apply the baseline there; mark the migrations as applied instead:
+
+```bash
+npx prisma migrate resolve --applied 20260920000000_baseline_current_schema
+npx prisma migrate resolve --applied 20260921215000_add_replied_to_email_event_type
+npx prisma migrate resolve --applied 20261001100000_add_campaign_sequence_relation
+npx prisma migrate resolve --applied 20261031120000_campaign_retry_tracking_and_lead_fk
+```
+
+Only mark a migration as applied if the database really contains its changes; run `npx prisma migrate status` afterwards. Take a backup before changing a production database.
 
 ## Environment
 

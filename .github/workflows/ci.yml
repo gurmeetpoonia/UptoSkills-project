@@ -53,12 +53,12 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
           DIRECT_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
         run: npx prisma validate
-      - name: Push schema
+      - name: Apply migrations
         working-directory: backend
         env:
           DATABASE_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
           DIRECT_URL: postgresql://postgres:postgres1234@localhost:5432/salesforge_test
-        run: npx prisma db push --skip-generate --accept-data-loss
+        run: npx prisma migrate deploy
       - name: Generate Prisma client
         working-directory: backend
         env:

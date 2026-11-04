@@ -29,6 +29,10 @@ Note: the drafts seen in the local run were the built-in template fallback, beca
 
 ## Migration notes
 
+- `20260920000000_baseline_current_schema` is new. The first three migrations only create an early schema (14 tables), while `20260921215000` and later assume the full one, so `prisma migrate deploy` failed on an empty database (`type "EmailEventType" does not exist`). The baseline sits between them and creates/alters everything missing; it excludes what `20261001100000` adds so that migration still applies unchanged.
+  - Checked on an empty PostgreSQL: all 7 migrations apply in order, and the resulting tables, columns, defaults, enums (values and order), indexes and constraints are identical to the schema Prisma generates from `schema.prisma`. This was done by applying each `migration.sql` with `psql` (one transaction per file), not with the real `prisma migrate deploy`, so please run `npx prisma migrate deploy` on an empty local database once and confirm.
+  - Databases created with `prisma db push`: use `prisma migrate resolve --applied` (see README), do not run the baseline there.
+  - The baseline drops `tags.description`, `tags.updatedAt` and `analytics_events.updatedAt` and replaces `tags.id` (TEXT to SERIAL). That is only relevant for a database that applied just the first three migrations and holds data in those tables.
 - `20261001100000_add_campaign_sequence_relation` is unchanged from the version that was reviewed. It creates a unique index on `sequence_enrollments("sequenceId", "leadId")`. On a database that already has data, check for duplicates first:
 
   ```sql
@@ -41,7 +45,7 @@ Note: the drafts seen in the local run were the built-in template fallback, beca
 
   Remove or merge any rows this returns before running the migration.
 - `20261031120000_campaign_retry_tracking_and_lead_fk` adds `EnrollmentStatus.FAILED`, `sequence_enrollments.retryCount`, and the missing `sequence_enrollments.leadId` foreign key. Enrollments that point to leads that no longer exist get `leadId = NULL` before the constraint is added; no rows are deleted.
-- Deploy with `npx prisma migrate deploy`. `prisma db push` is only for fresh local databases.
+- Deploy with `npx prisma migrate deploy`. CI, `render.yaml` and `docker-compose.yml` all use `migrate deploy`; nothing runs `prisma db push --accept-data-loss` anymore.
 
 ## Configuration
 
