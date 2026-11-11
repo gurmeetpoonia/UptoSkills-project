@@ -1,10 +1,11 @@
-const { connectRedis, redisClient } = require("./config/redis");
-
 const path = require("path");
 
+// Load env files BEFORE requiring anything that reads process.env (e.g. config/redis)
 for (const envFile of [path.resolve(__dirname, ".env.local"), path.resolve(__dirname, ".env")]) {
   require("dotenv").config({ path: envFile });
 }
+
+const { connectRedis, redisClient } = require("./config/redis");
 
 const app = require("./app");
 const { connectPostgres, prisma } = require("./config/postgres");
