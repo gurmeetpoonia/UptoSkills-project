@@ -439,6 +439,8 @@ export const ticketService = {
 
 export const campaignService = {
   list: (params) => unwrapList(api.get("/campaigns", { params })),
+  previewAudience: (audience) => unwrap(api.post("/campaigns/audience-preview", { audience })),
+  previewCopy: (data) => unwrap(api.post("/campaigns/copy-preview", data)),
   get: (id) => unwrap(api.get(`/campaigns/${id}`)),
   create: (data) => unwrap(api.post("/campaigns", data)),
   update: (id, data) => unwrap(api.patch(`/campaigns/${id}`, data)),
@@ -450,6 +452,7 @@ export const campaignService = {
   metrics: () => unwrap(api.get("/campaigns/metrics")),
   generateEmail: (data) => unwrap(api.post("/ai/generate-campaign-email", data)),
   optimization: () => unwrap(api.get("/campaigns/optimization")),
+  getLeads: (id) => unwrap(api.get(`/campaigns/${id}/leads`)),
 };
 
 export const kbService = {
