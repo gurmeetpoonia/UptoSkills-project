@@ -33,6 +33,8 @@ jobs: Dict[str, Dict[str, Any]] = {}
 #   serper             - the multi-platform Serper search in master_job_army.py (needs SERPER_API_KEY).
 #   both               - LinkedIn first; if it finds nothing and SERPER_API_KEY is set, use Serper.
 SCRAPER_ENGINE = os.environ.get("SCRAPER_ENGINE", "linkedin").strip().lower()
+DEFAULT_DISCOVERY_QUERY = os.environ.get("DEFAULT_DISCOVERY_QUERY", "Software Developer")
+DEFAULT_DISCOVERY_LOCATION = os.environ.get("DEFAULT_DISCOVERY_LOCATION", "India")
 scrape_lock = threading.Lock()  # the Serper engine drives Chromium: one run at a time (memory)
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _PHONE_RE = re.compile(r"(?:\+?91[\s-]?)?[6-9]\d{9}")
@@ -123,6 +125,47 @@ def search_hr_file(query: str, search_type: str, limit) -> list:
     return results
 
 
+def discover_search(req):
+    """Automatic discovery with free sources only (no Apollo, no paid API):
+    LinkedIn jobs (+ the Serper multi-platform search when SERPER_API_KEY is set) -> HR data match ->
+    for companies still without an HR contact, public contacts from the company website -> intelligent tool.
+    Returns (leads before filtering, note)."""
+    query = req.query.strip()
+    if query in ("", "*", "all"):
+        query = DEFAULT_DISCOVERY_QUERY
+    location = req.location or DEFAULT_DISCOVERY_LOCATION
+    problems, linkedin_jobs, other_jobs = [], [], []
+    try:
+        linkedin_jobs = run_master_job_army(search_query=query, headful=bool(req.headful), limit=None,
+                                            location=location, max_pages=int(req.max_pages or 2))
+    except Exception as e:  # LinkedIn blocked / offline: the other sources still run
+        problems.append(f"LinkedIn: {e}")
+    if os.environ.get("SERPER_API_KEY") and SCRAPER_ENGINE in ("serper", "both", "linkedin"):
+        try:
+            other_jobs = serper_search(req)  # Naukri, Indeed, Wellfound ... through the original Serper engine
+        except Exception as e:
+            problems.append(f"Other job sites: {e}")
+    jobs_found = linkedin_jobs + other_jobs
+    with_contact = [j for j in jobs_found if str(j.get("HR EMAIL") or NOT_DISCLOSED) != NOT_DISCLOSED
+                    or str(j.get("HR PHONE") or NOT_DISCLOSED) != NOT_DISCLOSED]
+    from_websites, stats = [], {"companies_without_contact": 0, "discovered": 0, "domain_not_found": 0, "nothing_public": 0}
+    try:
+        from_websites, stats = discover(jobs_found, 15)
+    except Exception as e:
+        problems.append(f"Company websites: {e}")
+    merged, seen = [], set()
+    for lead in with_contact + from_websites:
+        key = str(lead.get("HR EMAIL") or "").lower() or str(lead.get("JOB URL") or lead.get("COMPANY"))
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(lead)
+    note = (f"Live discovery for '{query}' in {location}: {len(jobs_found)} jobs read, "
+            f"{len(with_contact)} with an HR contact, {stats['discovered']} company websites gave a public contact.")
+    if problems:
+        note += " Skipped: " + "; ".join(problems) + "."
+    return merged, note
+
+
 def _finish(results: list, note: str, req: ScrapeRequest, limit: int = 0):
     """Pass the leads through the intelligent tool (valid email/mobile, not expired, not duplicate,
     scored, with a reason) and keep the best `limit`."""
@@ -139,6 +182,9 @@ def smart_search(req: ScrapeRequest):
     """Return (results, note). `note` explains an empty/filtered result so the UI never just says "0 leads"."""
     stype = req.search_type or "all"
     query = req.query.strip()
+    if stype == "discover":  # automatic live discovery (free sources), screened by the intelligent tool
+        found, note = discover_search(req)
+        return _finish(found, note, req, limit=1000)
     if query in ("*", "all"):  # list every lead we have (HR data), screened by the intelligent tool
         results = search_hr_file("", "company", 1000)
         return _finish(results, "" if results else "No leads available yet in the HR data.", req, limit=1000)
@@ -241,7 +287,7 @@ def health():
 
 @app.post("/scrape")
 def start_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
-    if req.search_type not in (None, "all", "name", "email", "company"):
+    if req.search_type not in (None, "all", "name", "email", "company", "discover"):
         raise HTTPException(status_code=400, detail="Invalid search_type")
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "queued", "results": [], "leads": [], "error": None, "note": ""}

@@ -61,3 +61,13 @@ Both job-search engines are available; pick one with the `SCRAPER_ENGINE` enviro
 Whatever the engine, every lead goes through the intelligent tool (valid email/mobile, not expired, no duplicates,
 score + reason). The HR data file `leads_with_hr.xlsx` is not part of the repository (it holds personal contact data):
 put it next to `main.py` or set `HR_EXCEL_PATH`.
+
+## Automatic discovery (`search_type: "discover"`)
+
+Find Leads shows the HR data instantly and then starts a live discovery with free sources only (no Apollo, no paid API):
+LinkedIn jobs (plus the Serper multi-platform search when `SERPER_API_KEY` is set) -> HR data match -> public contacts from
+the company website for companies still without an HR contact -> intelligent tool (valid email/mobile, not expired, no
+duplicates, score + reason). New leads are added to the list with a "New" badge. Defaults for an empty search:
+`DEFAULT_DISCOVERY_QUERY` (Software Developer) and `DEFAULT_DISCOVERY_LOCATION` (India).
+Note: LinkedIn and company websites rarely publish individual HR emails; public mailboxes such as hr@ or careers@ are
+generic and are not saved to the CRM. Named HR emails still come from the HR data (Apollo pilot).

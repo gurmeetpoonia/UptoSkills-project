@@ -79,6 +79,12 @@ const Leads = () => {
   const [findResults, setFindResults] = useState([]);
   const [findNote, setFindNote] = useState("");
   const [findInCrm, setFindInCrm] = useState(0);
+  // Live discovery (free sources): runs after the instant HR list and adds new leads to it
+  const [discoverJobId, setDiscoverJobId] = useState(null);
+  const [discoverStatus, setDiscoverStatus] = useState("idle"); // idle | running | done | error
+  const [discoverNote, setDiscoverNote] = useState("");
+  const [discoverCount, setDiscoverCount] = useState(0);
+  const autoDiscover = useRef(false);
   const [findSelected, setFindSelected] = useState([]);
   const findFailCount = useRef(0);
 
@@ -212,6 +218,11 @@ const Leads = () => {
       setFindNote("");
       setFindInCrm(0);
       setFindSelected([]);
+      setDiscoverStatus("idle");
+      setDiscoverJobId(null);
+      setDiscoverNote("");
+      setDiscoverCount(0);
+      autoDiscover.current = q === "*";
       findFailCount.current = 0;
 
       const res = await leadService.find(q);
@@ -225,6 +236,69 @@ const Leads = () => {
       );
     }
   };
+
+  const leadKey = (l) => findEmail(l) || String(l["JOB URL"] || l["COMPANY"] || "");
+
+  // Discover new leads from LinkedIn, other job sites and company websites (free, no Apollo)
+  const startDiscover = async () => {
+    try {
+      setDiscoverStatus("running");
+      setDiscoverNote("");
+      setDiscoverCount(0);
+      const res = await leadService.find(findQuery.trim() || "*", "discover");
+      setDiscoverJobId(res.jobId);
+    } catch (err) {
+      setDiscoverStatus("error");
+      toast.error(err.message || "Could not start discovery");
+    }
+  };
+
+  // After the instant list is shown, start discovery once (only for the "show all" view)
+  useEffect(() => {
+    if (showFindLeads && findStatus === "done" && autoDiscover.current && discoverStatus === "idle") {
+      autoDiscover.current = false;
+      startDiscover();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showFindLeads, findStatus, discoverStatus]);
+
+  useEffect(() => {
+    let timer;
+    if (showFindLeads && discoverStatus === "running" && discoverJobId) {
+      let fails = 0;
+      timer = setInterval(async () => {
+        try {
+          const res = await leadService.getFindStatus(discoverJobId);
+          if (res.status === "done") {
+            clearInterval(timer);
+            setFindResults((prev) => {
+              const seen = new Set(prev.map(leadKey));
+              const fresh = (res.leads || [])
+                .filter((l) => !seen.has(leadKey(l)))
+                .map((l) => ({ ...l, __new: true }));
+              setDiscoverCount(fresh.length);
+              return [...prev, ...fresh];
+            });
+            setDiscoverNote(res.note || "");
+            setDiscoverStatus("done");
+          } else if (res.status === "error") {
+            clearInterval(timer);
+            setDiscoverNote(res.error || "Discovery failed");
+            setDiscoverStatus("error");
+          }
+        } catch (err) {
+          fails += 1;
+          if (fails >= 3) {
+            clearInterval(timer);
+            setDiscoverStatus("error");
+            setDiscoverNote("Lost connection while discovering new leads.");
+          }
+        }
+      }, 5000);
+    }
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showFindLeads, discoverStatus, discoverJobId]);
 
   const confirmFind = async () => {
     if (findSelected.length === 0) return;
@@ -795,7 +869,39 @@ const Leads = () => {
                 >
                   {findStatus === "running" ? "Searching..." : findQuery.trim() ? "Search" : "Show all"}
                 </Button>
+
+                <Button
+                  type="button"
+                  onClick={startDiscover}
+                  disabled={findStatus === "running" || discoverStatus === "running"}
+                  className="bg-slate-700 text-white hover:bg-slate-600"
+                >
+                  {discoverStatus === "running" ? "Discovering..." : "Discover new"}
+                </Button>
               </form>
+            )}
+
+            {discoverStatus !== "idle" && findStatus !== "running" && (
+              <div className={`mb-4 flex items-center gap-2 rounded-xl border px-4 py-2 text-xs ${darkMode ? "border-slate-800 bg-slate-900/40 text-slate-300" : "border-slate-200 bg-slate-50 text-slate-600"}`}>
+                {discoverStatus === "running" && (
+                  <>
+                    <span className="h-3 w-3 animate-spin rounded-full border-2 border-teal-500 border-t-transparent" />
+                    Discovering new leads from LinkedIn and company websites (free sources). The list below stays usable and new leads are added when ready.
+                  </>
+                )}
+                {discoverStatus === "done" && (
+                  <>
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    {discoverCount} new {discoverCount === 1 ? "lead" : "leads"} discovered. {discoverNote}
+                  </>
+                )}
+                {discoverStatus === "error" && (
+                  <>
+                    <XCircle className="h-4 w-4 text-rose-500" />
+                    Live discovery could not finish: {discoverNote}
+                  </>
+                )}
+              </div>
             )}
 
             {findStatus === "running" && (
@@ -900,6 +1006,11 @@ const Leads = () => {
                                 <div className="min-w-0">
                                   <div className={`font-medium ${heading}`}>
                                     {l["COMPANY"] || "Unknown"}
+                                    {l.__new ? (
+                                      <span className="ml-2 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-950/50 dark:text-sky-300">
+                                        New
+                                      </span>
+                                    ) : null}
                                   </div>
                                   <div className="mt-1.5 flex flex-wrap gap-2">
                                     {findEmail(l) ? (

@@ -275,6 +275,32 @@ try:
     if old_key:
         os.environ["SERPER_API_KEY"] = old_key
     del sys.modules["master_job_army"]
+    # automatic discovery (free sources): LinkedIn jobs + company websites, merged and screened by the tool
+    jobs_li = [{"COMPANY": "Alpha Soft", "JOB TITLE": "Dev", "JOB URL": "https://l/1", "HR NAME": "Meera Rao", "HR EMAIL": "meera.rao@alphasoft.com",
+                "HR PHONE": "Not Disclosed", "HR CONTACT": "meera.rao@alphasoft.com", "SOURCE": "LinkedIn"},
+               {"COMPANY": "Beta Labs", "JOB TITLE": "Dev", "JOB URL": "https://l/2", "HR NAME": "Not Disclosed", "HR EMAIL": "Not Disclosed",
+                "HR PHONE": "Not Disclosed", "HR CONTACT": "Not Disclosed", "SOURCE": "LinkedIn"}]
+    site_lead = {"COMPANY": "Beta Labs", "JOB TITLE": "Dev", "JOB URL": "https://l/2", "HR NAME": "Not Disclosed", "HR EMAIL": "hiring.lead@betalabs.com",
+                 "HR PHONE": "+919822145678", "HR CONTACT": "hiring.lead@betalabs.com", "SOURCE": "Company website"}
+    seen_args = {}
+    def fake_li(**kw):
+        seen_args.update(kw)
+        return jobs_li
+    main.run_master_job_army = fake_li
+    main.discover = lambda leads, n: ([site_lead], {"companies_without_contact": 1, "discovered": 1, "domain_not_found": 0, "nothing_public": 0})
+    main.SCRAPER_ENGINE = "linkedin"
+    r_disc = Req("*", "discover")
+    res, note = main.smart_search(r_disc)
+    check("discover: empty query uses the default keywords + location", seen_args.get("search_query") == main.DEFAULT_DISCOVERY_QUERY and seen_args.get("location") == main.DEFAULT_DISCOVERY_LOCATION)
+    check("discover: LinkedIn HR-matched lead and the company-website lead are both returned, all tool-selected", {x["COMPANY"] for x in res} == {"Alpha Soft", "Beta Labs"} and all(x["TOOL_SELECTED"] for x in res))
+    check("discover: note explains jobs read and websites used", "jobs read" in note and "company websites" in note)
+    def li_down(**kw):
+        raise RuntimeError("HTTP 429")
+    main.run_master_job_army = li_down
+    res, note = main.smart_search(Req("python", "discover"))
+    check("discover: LinkedIn down -> company-website leads still returned, problem noted", len(res) == 1 and "429" in note)
+    jid = c.post("/scrape", json={"query": "*", "search_type": "discover"}).status_code
+    check("API accepts search_type 'discover'", jid == 200)
 except ImportError as e:
     print("[SKIP] FastAPI tests:", e)
 
