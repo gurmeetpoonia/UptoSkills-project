@@ -1,6 +1,8 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
-playwright
+pandas
+openpyxl
 beautifulsoup4
-
+playwright
+httpx

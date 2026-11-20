@@ -1,35 +1,108 @@
+
 const axios = require("axios");
 const { findLeadsQueue } = require("../queues/findLeadsQueue");
 const { redisClient } = require("../config/redis");
 const { prisma } = require("../config/postgres");
-const { enrollLeadInActiveCampaigns } = require("../services/campaignAutomationService");
 const { recordActivity } = require("../services/leadActivityService");
+const { enrollLeadInActiveCampaigns } = require("../services/campaignAutomationService");
 const asyncHandler = require("../utils/asyncHandler");
 const response = require("../utils/response");
 const { AppError } = require("../middleware/errorHandler");
-const SCRAPER_URL = process.env.SCRAPER_URL || "http://localhost:8000";
+
+const SCRAPER_API_URL = (
+  process.env.JOB_SCRAPER_URL ||
+  process.env.SCRAPER_URL ||
+  process.env.SCRAPER_API_URL ||
+  "http://localhost:8000"
+).replace(/\/+$/, "");
+
+// Generic mailbox names that should not be saved as individual HR contacts.
+const GENERIC_EMAIL_NAMES = new Set([
+  "careers",
+  "career",
+  "jobs",
+  "job",
+  "hr",
+  "info",
+  "contact",
+  "hello",
+  "support",
+  "admin",
+  "recruitment",
+  "recruiter",
+  "talent",
+  "hiring",
+  "office",
+  "mail",
+  "enquiry",
+  "inquiry",
+  "apply",
+  "team",
+]);
+
+// Extract and validate an individual email from HR CONTACT.
+const parseHrEmail = (hrContact) => {
+  const emailRegex =
+    /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+
+  const emailMatch = hrContact.match(emailRegex);
+
+  if (!emailMatch) {
+    return {
+      email: null,
+      reason: "No valid email address found in HR CONTACT",
+    };
+  }
+
+  const email = emailMatch[0].trim().toLowerCase();
+
+  // Check generic mailbox names, including plus-address variants.
+  const localPart = email.split("@")[0].split("+")[0];
+
+  if (GENERIC_EMAIL_NAMES.has(localPart)) {
+    return {
+      email: null,
+      reason: "Generic mailbox email is not accepted",
+    };
+  }
+
+  return {
+    email,
+    reason: null,
+  };
+};
 
 // 1. POST /api/leads/find
 const findLeads = asyncHandler(async (req, res) => {
-  const { searchQuery } = req.body;
+  const { searchQuery, searchType = "all" } = req.body;
+
   if (!searchQuery) {
     throw new AppError("searchQuery is required", 400);
   }
 
-  // Call FastAPI to start scraping
   let fastapiRes;
+
   try {
-    fastapiRes = await axios.post(`${SCRAPER_URL}/scrape`, {
-      query: searchQuery,
-      limit: 20 // Default limit, can be parameterized
-    });
+    fastapiRes = await axios.post(
+      `${SCRAPER_API_URL}/scrape`,
+      {
+        query: searchQuery,
+        search_type: searchType,
+        limit: 10,
+      },
+      { timeout: 60000 }
+    );
   } catch (error) {
-    throw new AppError("Failed to communicate with FastAPI scraper service", 502);
+    console.error("Scraper start failed:", error.message);
+
+    throw new AppError(
+      "Could not reach the scraper service. It may be waking up, please try again in a minute.",
+      502
+    );
   }
 
   const fastapiJobId = fastapiRes.data.job_id;
 
-  // Enqueue BullMQ job
   const job = await findLeadsQueue.add("poll-fastapi", {
     fastapiJobId,
   });
@@ -41,132 +114,224 @@ const findLeads = asyncHandler(async (req, res) => {
 const getFindLeadsStatus = asyncHandler(async (req, res) => {
   const { jobId } = req.params;
   const job = await findLeadsQueue.getJob(jobId);
-  
+
   if (!job) {
     throw new AppError("Job not found", 404);
   }
 
   const state = await job.getState();
-  
-  // States: waiting, active, completed, failed, delayed, etc.
+
   if (state === "completed") {
-    // Fetch raw leads from redis
-    const resultStr = await redisClient.get(`find-leads-result:${jobId}`);
-    const leads = resultStr ? JSON.parse(resultStr) : [];
-    return response.success(res, { status: "done", leads });
-  } else if (state === "failed") {
-    return response.success(res, { status: "error", error: job.failedReason });
-  } else {
-    // running or waiting
-    return response.success(res, { status: "running" });
+    const resultStr = await redisClient.get(
+      `find-leads-result:${jobId}`
+    );
+
+    const allLeads = resultStr ? JSON.parse(resultStr) : [];
+    const note = (await redisClient.get(`find-leads-note:${jobId}`)) || "";
+
+    // Leads already saved in the CRM are not offered again.
+    const emailOf = (l) => {
+      const m = String(l["HR EMAIL"] || l["HR CONTACT"] || "").match(
+        /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/
+      );
+      return m ? m[0].toLowerCase() : "";
+    };
+    const emails = [...new Set(allLeads.map(emailOf).filter(Boolean))];
+    let known = new Set();
+    if (emails.length) {
+      try {
+        const rows = await prisma.lead.findMany({
+          where: { email: { in: emails } },
+          select: { email: true },
+        });
+        known = new Set(rows.map((r) => r.email.toLowerCase()));
+      } catch (err) {
+        console.error("Could not check existing CRM leads:", err.message);
+      }
+    }
+    const leads = allLeads.filter((l) => !known.has(emailOf(l)));
+
+    return response.success(res, {
+      status: "done",
+      leads,
+      note,
+      alreadyInCrm: allLeads.length - leads.length,
+    });
   }
+
+  if (state === "failed") {
+    return response.success(res, {
+      status: "error",
+      error: job.failedReason,
+    });
+  }
+
+  return response.success(res, {
+    status: "running",
+  });
 });
 
 // 3. POST /api/leads/find/:jobId/confirm
 const confirmFindLeads = asyncHandler(async (req, res) => {
   const { selectedLeads } = req.body;
+
   if (!Array.isArray(selectedLeads)) {
     throw new AppError("selectedLeads must be an array", 400);
   }
 
-  const results = { created: [], skipped: [] };
+  const results = {
+    created: [],
+    skipped: [],
+  };
 
   for (const item of selectedLeads) {
-    // Skip if HR CONTACT does not contain a parseable email
-    // A simplistic check: HR CONTACT needs to include an "@" symbol.
-    const hrContact = item["HR CONTACT"] || "";
-    let parsedEmail = null;
-    
-    if (hrContact.includes("Inferred (unverified)")) {
+    if (!item || typeof item !== "object") {
       results.skipped.push({
         item,
-        reason: "unverified inferred email, not used"
+        reason: "Invalid lead record",
       });
       continue;
     }
 
-    const emailMatch = hrContact.match(/Email:\s*([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)/i);
-    if (emailMatch && emailMatch[1]) {
-      parsedEmail = emailMatch[1].toLowerCase();
-    } else if (hrContact.includes("@")) {
-      // Fallback simple regex extraction if it wasn't prefixed with "Email: "
-      const rawMatch = hrContact.match(/[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+/);
-      if (rawMatch) {
-        parsedEmail = rawMatch[0].toLowerCase();
-      }
+    // The intelligent tool already screened this lead in the scraper
+    // service; never save one it rejected.
+    if (item["TOOL_SELECTED"] === false) {
+      results.skipped.push({
+        item,
+        reason:
+          item["SELECTION_REASON"] ||
+          "Not selected by the intelligent tool",
+      });
+      continue;
     }
+
+    const hrContact = String(item["HR CONTACT"] || "").trim();
+
+    const verification = String(
+      item["VERIFICATION"] || ""
+    ).toLowerCase();
+
+    // Normalize status so both "Not Disclosed" and
+    // "NotDisclosed" are recognized.
+    const normalizedVerification = verification.replace(
+      /[^a-z]/g,
+      ""
+    );
+
+    const normalizedContact = hrContact.toLowerCase();
+
+    // Reject missing, inferred, generic, and undisclosed contacts.
+    if (
+      !hrContact ||
+      normalizedContact === "not disclosed" ||
+      normalizedContact === "notdisclosed" ||
+      /inferred\s*\(unverified\)/i.test(hrContact) ||
+      /inferred\s*\(unverified\)/i.test(verification) ||
+      verification.includes("generic email") ||
+      normalizedVerification.includes("notdisclosed")
+    ) {
+      results.skipped.push({
+        item,
+        reason: "Missing, inferred, generic or undisclosed contact",
+      });
+      continue;
+    }
+
+    // Extract and validate the email independently on the backend.
+    const { email: parsedEmail, reason } =
+      parseHrEmail(hrContact);
 
     if (!parsedEmail) {
+      const hasPhone = /\d{8,}/.test(String(item["HR PHONE"] || ""));
       results.skipped.push({
         item,
-        reason: "No parseable email address in HR CONTACT"
+        reason: hasPhone
+          ? "Phone-only lead: the CRM needs an email, kept for follow-up"
+          : reason,
       });
       continue;
     }
 
-    // Map fields
+    // Map scraper fields to CRM fields.
     const companyName = item["COMPANY"] || null;
     const jobTitle = item["JOB TITLE"] || null;
     const location = item["AREA / LOCATION"] || null;
     const score = item["SCORE"] || 0;
-    
-    // Construct name as "HR — {COMPANY}"
-    const leadName = companyName ? `HR — ${companyName}` : "HR — Unknown Company";
 
+    // Use the HR person's own name (e.g. "Priyanka Pandita"); fall back to "HR — Company".
+    const hrName = String(item["HR NAME"] || "").trim();
+    const hasHrName = hrName && !/^not\s*disclosed$/i.test(hrName);
+    const leadName = hasHrName
+      ? hrName
+      : companyName
+        ? `HR — ${companyName}`
+        : "HR — Unknown Company";
+
+    // Preserve the original verification information.
     const engagement = {
       salary: item["SALARY"],
-      verification: item["VERIFICATION"],
+      verification: item["VERIFICATION"] || "Unverified",
       jobUrl: item["JOB URL"],
       fullDescription: item["FULL DESCRIPTION"],
       originalSource: item["SOURCE"],
-      discovered: item["DISCOVERED"]
+      discovered: item["DISCOVERED"],
+      selectionReason: item["SELECTION_REASON"],
+      leadClass: item["LEAD_CLASS"],
+      toolScore: item["TOOL_SCORE"],
+      toolEngine: item["TOOL_ENGINE"],
+      hrTitle: item["HR TITLE"],
     };
 
-    // Dedup-on-email / create logic
     try {
-      const existing = await prisma.lead.findUnique({ where: { email: parsedEmail } });
-      
+      // Check whether this email already exists.
+      const existing = await prisma.lead.findUnique({
+        where: {
+          email: parsedEmail,
+        },
+      });
+
       if (existing) {
-        // Skip or update? The spec says:
-        // "Create the lead using the same logic/dedup-on-email behavior as the existing createLead controller"
-        // Existing createLead logic returns the existing lead if it's in the same org, or throws an error.
-        // We will just skip creating a new one and maybe push to skipped.
         results.skipped.push({
           item,
-          reason: "Lead with this email already exists"
+          reason: "Lead with this email already exists",
         });
-      } else {
-        const lead = await prisma.lead.create({
-          data: {
-            name: leadName,
-            email: parsedEmail,
-            companyName: companyName,
-            jobTitle: jobTitle,
-            location: location,
-            score: score,
-            status: "new",
-            source: "database_search", // "database_search" is an enum val matching our needs
-            engagement: engagement,
-            orgId: req.orgId,
-            addedById: req.user.id
-          }
-        });
+        continue;
+      }
 
-        await recordActivity({
-          leadId: lead.id,
-          userId: req.user.id,
+      const lead = await prisma.lead.create({
+        data: {
+          name: leadName,
+          email: parsedEmail,
+          companyName,
+          jobTitle,
+          location,
+          score,
+          status: "new",
+          source: "database_search",
+          engagement,
           orgId: req.orgId,
-          type: "CREATED",
-          title: `${req.user.name} created this lead via Find Leads`
-        });
+          addedById: req.user.id,
+        },
+      });
 
-        results.created.push(lead);
+      await recordActivity({
+        leadId: lead.id,
+        userId: req.user.id,
+        orgId: req.orgId,
+        type: "CREATED",
+        title: `${req.user.name} created this lead via Find Leads`,
+      });
+
+      results.created.push(lead);
+      try {
         await enrollLeadInActiveCampaigns(lead, req.orgId, req.user.id);
+      } catch (enrollErr) {
+        console.error("Campaign enrollment failed for lead", lead.id, enrollErr.message);
       }
     } catch (err) {
       results.skipped.push({
         item,
-        reason: `DB Error: ${err.message}`
+        reason: `DB Error: ${err.message}`,
       });
     }
   }

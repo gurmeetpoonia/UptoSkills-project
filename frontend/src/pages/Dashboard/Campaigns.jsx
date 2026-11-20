@@ -499,18 +499,15 @@ const loadOptimization = async () => {
         darkMode={darkMode}
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <UptoButton
-              variant={!showStudio ? "primary" : "secondary"}
-              onClick={() => setShowStudio(false)}
-            >
-              <Megaphone className="mr-1.5 inline h-4 w-4" /> Campaign History
-            </UptoButton>
-            <UptoButton
-              variant={showStudio ? "primary" : "secondary"}
-              onClick={() => setShowStudio(true)}
-            >
-              <Sparkles className="mr-1.5 inline h-4 w-4" /> Create Campaign
-            </UptoButton>
+            {showStudio ? (
+              <UptoButton variant="secondary" onClick={() => setShowStudio(false)}>
+                <Megaphone className="mr-1.5 inline h-4 w-4" /> Back to Campaigns
+              </UptoButton>
+            ) : (
+              <UptoButton variant="primary" onClick={() => setShowStudio(true)}>
+                <Sparkles className="mr-1.5 inline h-4 w-4" /> Create Campaign
+              </UptoButton>
+            )}
           </div>
         }
       />
