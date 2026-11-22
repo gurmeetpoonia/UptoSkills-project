@@ -821,7 +821,11 @@ const optimization = asyncHandler(async (req, res) => {
         ? "completed"
         : conditions.status === "scheduled"
           ? "scheduled"
-          : "draft";
+          : conditions.status === "paused"
+            ? "paused"
+            : conditions.status === "cancelled"
+              ? "stopped"
+              : "draft";
 
     const base = {
       campaignId: campaign.id,

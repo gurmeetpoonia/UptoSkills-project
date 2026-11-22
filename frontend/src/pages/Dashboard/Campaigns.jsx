@@ -34,6 +34,7 @@ import {
 import CampaignStudio from "./CampaignStudio";
 import { toast } from "sonner";
 import { pageCache } from "@/utils/pageCache";
+import { SectionHeading } from "@/components/UI/UptoStyles";
 
 const LEADS_PER_PAGE = 5;
 
@@ -52,6 +53,8 @@ const STATUS_STYLE = {
   completed: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20",
   scheduled: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20",
   draft: "bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20",
+  paused: "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20",
+  stopped: "bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20",
 };
 
 const timeAgo = (value) => {
@@ -101,16 +104,22 @@ const RateCell = ({ rate, count, color }) => (
 
 const OPT_TH = "px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500";
 
+const progressOf = (c) => {
+  if (c.status === "completed") return 100;
+  if (!c.enrolled) return 0;
+  return Math.min(100, Math.round(((c.enrolledByStatus?.COMPLETED || 0) / c.enrolled) * 100));
+};
+
 const CampaignOptimization = ({ optimization, loading, updatedAt, onRefresh }) => {
   const campaigns = optimization?.campaigns || [];
   const totals = optimization?.totals || {};
 
   return (
-    <UptoCard className="mb-6 p-0 overflow-hidden">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200/80 p-5 dark:border-slate-800">
+    <section className="mb-8">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold">Campaign Optimization</h2>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
+          <SectionHeading label="Campaign Optimization" />
+          <p className="-mt-5 text-sm text-slate-500 dark:text-slate-400">
             Opens, clicks and replies update live as leads interact with your emails.
           </p>
         </div>
@@ -122,84 +131,99 @@ const CampaignOptimization = ({ optimization, loading, updatedAt, onRefresh }) =
           <button
             type="button"
             onClick={onRefresh}
-            className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-medium hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
+            className="rounded-lg border border-slate-200 bg-white/40 px-2 py-1 text-xs font-medium backdrop-blur hover:bg-white/70 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
           >
             Refresh
           </button>
         </div>
       </div>
 
-      {loading && campaigns.length === 0 ? (
-        <div className="p-6"><UptoSpinner compact /></div>
-      ) : campaigns.length === 0 ? (
-        <p className="py-8 text-center text-sm text-slate-500">
-          No campaigns yet. Create one and its performance will show up here.
-        </p>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-50/80 dark:bg-slate-900/60">
-              <tr>
-                <th className={OPT_TH}>Campaign</th>
-                <th className={OPT_TH}>Enrolled</th>
-                <th className={OPT_TH}>Delivered</th>
-                <th className={OPT_TH}>Open rate</th>
-                <th className={OPT_TH}>Click rate</th>
-                <th className={OPT_TH}>Reply rate</th>
-                <th className={OPT_TH}>Recommendation</th>
-              </tr>
-            </thead>
-            <tbody>
-              {campaigns.map((c) => (
-                <tr key={c.campaignId} className="border-t border-slate-100 align-top dark:border-slate-800/80">
-                  <td className="px-4 py-3">
-                    <p className="max-w-[200px] truncate font-semibold text-slate-900 dark:text-white">{c.campaignName}</p>
-                    <div className="mt-1 flex items-center gap-2">
-                      <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold capitalize ${STATUS_STYLE[c.status] || STATUS_STYLE.draft}`}>
-                        {c.status}
-                      </span>
-                      <span className="text-[11px] text-slate-500">{c.sent} sent</span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white">{c.enrolled}</td>
-                  <td className="px-4 py-3">
-                    <span className="font-semibold text-slate-900 dark:text-white">{c.delivered}</span>
-                    {c.bounced > 0 && <p className="text-[11px] text-rose-500">{c.bounced} bounced ({c.bounceRate}%)</p>}
-                  </td>
-                  <td className="px-4 py-3"><RateCell rate={c.openRate} count={c.opened} color="bg-teal-500" /></td>
-                  <td className="px-4 py-3"><RateCell rate={c.clickRate} count={c.clicked} color="bg-blue-500" /></td>
-                  <td className="px-4 py-3"><RateCell rate={c.replyRate} count={c.replied} color="bg-emerald-500" /></td>
-                  <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
-                    {c.recommendations?.length ? (
-                      <ul className="max-w-[260px] space-y-1">
-                        {c.recommendations.map((r, i) => (
-                          <li key={i} className="leading-snug">• {r}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <span className="text-slate-400">No suggestions</span>
-                    )}
-                  </td>
+      <div className="overflow-hidden rounded-2xl border border-white/50 bg-white/55 shadow-[0_8px_32px_rgba(15,23,42,0.10)] backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_8px_32px_rgba(0,0,0,0.35)]">
+        {loading && campaigns.length === 0 ? (
+          <div className="p-6"><UptoSpinner compact /></div>
+        ) : campaigns.length === 0 ? (
+          <p className="py-8 text-center text-sm text-slate-500">
+            No campaigns yet. Create one and its performance will show up here.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-white/40 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:bg-white/5 dark:text-slate-400">
+                <tr>
+                  <th className="px-4 py-3">Campaign</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Progress</th>
+                  <th className="px-4 py-3">Enrolled</th>
+                  <th className="px-4 py-3">Delivered</th>
+                  <th className="px-4 py-3">Open rate</th>
+                  <th className="px-4 py-3">Click rate</th>
+                  <th className="px-4 py-3">Reply rate</th>
+                  <th className="px-4 py-3">Recommendation</th>
                 </tr>
-              ))}
-            </tbody>
-            <tfoot className="border-t-2 border-slate-200 bg-slate-50/80 dark:border-slate-700 dark:bg-slate-900/60">
-              <tr>
-                <td className="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500">
-                  All campaigns ({totals.campaigns ?? campaigns.length})
-                </td>
-                <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white">{totals.enrolled ?? 0}</td>
-                <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white">{totals.delivered ?? totals.sent ?? 0}</td>
-                <td className="px-4 py-3 font-semibold text-teal-600 dark:text-teal-400">{totals.openRate ?? 0}%</td>
-                <td className="px-4 py-3 font-semibold text-blue-600 dark:text-blue-400">{totals.clickRate ?? 0}%</td>
-                <td className="px-4 py-3 font-semibold text-emerald-600 dark:text-emerald-400">{totals.replyRate ?? 0}%</td>
-                <td />
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      )}
-    </UptoCard>
+              </thead>
+              <tbody>
+                {campaigns.map((c) => {
+                  const pct = progressOf(c);
+                  return (
+                    <tr key={c.campaignId} className="border-t border-slate-200/60 align-top transition-colors hover:bg-white/40 dark:border-white/5 dark:hover:bg-white/5">
+                      <td className="px-4 py-3">
+                        <p className="max-w-[180px] truncate font-semibold text-slate-900 dark:text-white">{c.campaignName}</p>
+                        <p className="text-[11px] text-slate-500">{c.sent} sent</p>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold capitalize ${STATUS_STYLE[c.status] || STATUS_STYLE.draft}`}>
+                          {c.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="min-w-[110px]">
+                          <span className="text-xs font-semibold text-slate-800 dark:text-slate-100">{pct}%</span>
+                          <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-200/80 dark:bg-white/10">
+                            <div className="h-full rounded-full bg-gradient-to-r from-[#00b5ad] to-teal-300 transition-all duration-500" style={{ width: `${pct}%` }} />
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white">{c.enrolled}</td>
+                      <td className="px-4 py-3">
+                        <span className="font-semibold text-slate-900 dark:text-white">{c.delivered}</span>
+                        {c.bounced > 0 && <p className="text-[11px] text-rose-500">{c.bounced} bounced ({c.bounceRate}%)</p>}
+                      </td>
+                      <td className="px-4 py-3"><RateCell rate={c.openRate} count={c.opened} color="bg-teal-500" /></td>
+                      <td className="px-4 py-3"><RateCell rate={c.clickRate} count={c.clicked} color="bg-blue-500" /></td>
+                      <td className="px-4 py-3"><RateCell rate={c.replyRate} count={c.replied} color="bg-emerald-500" /></td>
+                      <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
+                        {c.recommendations?.length ? (
+                          <ul className="max-w-[240px] space-y-1">
+                            {c.recommendations.map((r, i) => (
+                              <li key={i} className="leading-snug">• {r}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <span className="text-slate-400">No suggestions</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot className="border-t-2 border-slate-200/70 bg-white/40 dark:border-white/10 dark:bg-white/5">
+                <tr>
+                  <td className="px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500" colSpan={3}>
+                    All campaigns ({totals.campaigns ?? campaigns.length})
+                  </td>
+                  <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white">{totals.enrolled ?? 0}</td>
+                  <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white">{totals.delivered ?? totals.sent ?? 0}</td>
+                  <td className="px-4 py-3 font-semibold text-teal-600 dark:text-teal-400">{totals.openRate ?? 0}%</td>
+                  <td className="px-4 py-3 font-semibold text-blue-600 dark:text-blue-400">{totals.clickRate ?? 0}%</td>
+                  <td className="px-4 py-3 font-semibold text-emerald-600 dark:text-emerald-400">{totals.replyRate ?? 0}%</td>
+                  <td />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
   );
 };
 
@@ -658,6 +682,13 @@ const loadOptimization = async (silent = false) => {
         </span>
       );
     }
+    if (status === "cancelled") {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20">
+          <Square className="w-3 h-3" /> Stopped
+        </span>
+      );
+    }
     if (c.active) {
       return (
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-teal-500/10 text-teal-600 dark:text-teal-400 border border-teal-500/20">
@@ -693,7 +724,7 @@ const loadOptimization = async (silent = false) => {
         }
       />
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <div className="rounded-2xl border border-slate-200/80 bg-white/70 p-4 backdrop-blur dark:border-slate-800 dark:bg-slate-900/60 shadow-sm">
+          <div className="rounded-2xl p-4 border border-white/50 bg-white/55 shadow-[0_8px_32px_rgba(15,23,42,0.10)] backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_8px_32px_rgba(0,0,0,0.35)]">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
               Total Campaigns
             </span>
@@ -701,7 +732,7 @@ const loadOptimization = async (silent = false) => {
               {items.length}
             </p>
           </div>
-          <div className="rounded-2xl border border-slate-200/80 bg-white/70 p-4 backdrop-blur dark:border-slate-800 dark:bg-slate-900/60 shadow-sm">
+          <div className="rounded-2xl p-4 border border-white/50 bg-white/55 shadow-[0_8px_32px_rgba(15,23,42,0.10)] backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_8px_32px_rgba(0,0,0,0.35)]">
             <span className="text-xs font-semibold uppercase tracking-wider text-teal-600 dark:text-teal-400">
               Running
             </span>
@@ -709,7 +740,7 @@ const loadOptimization = async (silent = false) => {
               {items.filter((c) => c.active).length}
             </p>
           </div>
-          <div className="rounded-2xl border border-slate-200/80 bg-white/70 p-4 backdrop-blur dark:border-slate-800 dark:bg-slate-900/60 shadow-sm">
+          <div className="rounded-2xl p-4 border border-white/50 bg-white/55 shadow-[0_8px_32px_rgba(15,23,42,0.10)] backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_8px_32px_rgba(0,0,0,0.35)]">
             <span className="text-xs font-semibold uppercase tracking-wider text-blue-500">
               Scheduled
             </span>
@@ -717,7 +748,7 @@ const loadOptimization = async (silent = false) => {
               {items.filter((c) => c.conditions?.status === "scheduled" && !c.active).length}
             </p>
           </div>
-          <div className="rounded-2xl border border-slate-200/80 bg-white/70 p-4 backdrop-blur dark:border-slate-800 dark:bg-slate-900/60 shadow-sm">
+          <div className="rounded-2xl p-4 border border-white/50 bg-white/55 shadow-[0_8px_32px_rgba(15,23,42,0.10)] backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_8px_32px_rgba(0,0,0,0.35)]">
             <span className="text-xs font-semibold uppercase tracking-wider text-emerald-500">
               Completed
             </span>
@@ -739,75 +770,73 @@ const loadOptimization = async (silent = false) => {
       )}
 
       <div className="w-full space-y-4">
-        <UptoCard className="p-0 overflow-hidden border border-slate-200 dark:border-slate-800">
-          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800/80">
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Your Campaigns</h2>
-            <span className="text-xs text-slate-500">{items.length} total</span>
+        <section>
+          <div className="mb-3 flex items-end justify-between gap-3">
+            <SectionHeading label="Your Campaigns" darkMode={darkMode} />
+            <span className="mb-7 text-xs text-slate-500">{items.length} total</span>
           </div>
-          {loading && (
-            <div className="p-8">
-              <UptoSpinner />
-            </div>
-          )}
 
-          {error && (
-            <div className="p-6">
-              <UptoError message={error} onRetry={load} />
-            </div>
-          )}
+          <div className="overflow-hidden rounded-2xl GLASS">
+            {loading && (
+              <div className="p-8">
+                <UptoSpinner />
+              </div>
+            )}
 
-          {!loading && !error && items.length === 0 && (
-            <div className="p-8">
-              <UptoEmptyState
-                icon={Megaphone}
-                title="No campaigns yet"
-                body="Launch your first outreach or workflow to track activity and delivery status here."
-              />
-            </div>
-          )}
+            {error && (
+              <div className="p-6">
+                <UptoError message={error} onRetry={load} />
+              </div>
+            )}
 
-          {!loading && !error && items.length > 0 && (
-            <div className="divide-y divide-slate-100 dark:divide-slate-800/80">
-              {items.map((c) => (
-                <div
-                  key={c.id}
-                  className="group transition-colors hover:bg-slate-50/60 dark:hover:bg-slate-800/30 p-4 sm:p-5"
-                >
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                    <div className="space-y-1.5 min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2.5">
-                        <h3 className="text-base font-bold text-slate-900 dark:text-white truncate">
-                          {c.name}
-                        </h3>
-                        {getStatusBadge(c)}
-                      </div>
+            {!loading && !error && items.length === 0 && (
+              <div className="p-8">
+                <UptoEmptyState
+                  icon={Megaphone}
+                  title="No campaigns yet"
+                  body="Launch your first outreach or workflow to track activity and delivery status here."
+                />
+              </div>
+            )}
 
-                      <div className="flex flex-wrap items-center gap-y-1.5 gap-x-3 text-xs text-slate-500 dark:text-slate-400">
-                        <span className="flex items-center gap-1">
-                          <Calendar className="h-3.5 w-3.5 text-slate-400" />
-                          {c.conditions?.schedule
-                            ? new Date(c.conditions.schedule).toLocaleString(undefined, {
-                                month: "short",
-                                day: "numeric",
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              })
-                            : "No schedule"}
-                        </span>
-                        <span>•</span>
-                        <span className="flex items-center gap-1 font-medium text-teal-600 dark:text-teal-400">
-                          <Users className="h-3.5 w-3.5" />
-                          {(() => {
-                            const enrolled = optimizationById.get(c.id)?.enrolled ?? 0;
-                            return enrolled > 0 || !(c.conditions?.status === "scheduled" && !c.active)
-                              ? `${enrolled} enrolled`
-                              : `${c.expectedLeads ?? 0} expected`;
-                          })()}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2">
+            {!loading && !error && items.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-white/40 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:bg-white/5 dark:text-slate-400">
+                    <tr>
+                      <th className="px-4 py-3">Campaign</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Schedule</th>
+                      <th className="px-4 py-3">Enrolled</th>
+                      <th className="px-4 py-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((c) => (
+                      <React.Fragment key={c.id}>
+                        <tr className="border-t border-slate-200/60 transition-colors hover:bg-white/40 dark:border-white/5 dark:hover:bg-white/5">
+                          <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white">{c.name}</td>
+                          <td className="px-4 py-3">{getStatusBadge(c)}</td>
+                          <td className="px-4 py-3 text-slate-600 dark:text-slate-300">
+                            {c.conditions?.schedule
+                              ? new Date(c.conditions.schedule).toLocaleString(undefined, {
+                                  month: "short",
+                                  day: "numeric",
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })
+                              : "No schedule"}
+                          </td>
+                          <td className="px-4 py-3 font-medium text-teal-600 dark:text-teal-400">
+                            {(() => {
+                              const enrolled = optimizationById.get(c.id)?.enrolled ?? 0;
+                              return enrolled > 0 || !(c.conditions?.status === "scheduled" && !c.active)
+                                ? `${enrolled} enrolled`
+                                : `${c.expectedLeads ?? 0} expected`;
+                            })()}
+                          </td>
+                          <td className="px-4 py-3">
+                          <div className="flex flex-wrap items-center justify-end gap-2">
                       {c.conditions?.status === "paused" ? (
                         <>
                           <UptoButton
@@ -889,125 +918,116 @@ const loadOptimization = async (silent = false) => {
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
-                  </div>
+                          </td>
+                        </tr>
 
-                  {c.conditions?.status === "error" && c.conditions?.lastError && (
-                    <div className="mt-3.5 rounded-xl border border-rose-200 bg-rose-50/80 dark:border-rose-900/50 dark:bg-rose-950/20 p-3 text-xs flex items-start gap-2 text-rose-700 dark:text-rose-300">
-                      <AlertCircle className="h-4 w-4 shrink-0 text-rose-500 mt-0.5" />
-                      <div>
-                        <span className="font-semibold">Activation error: </span>
-                        <span>{c.conditions.lastError}</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Leads drawer */}
-                  {expandedId === c.id && (
-                    <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-800/40">
-                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
-                        <span className="font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">
-                          Campaign leads
-                          {leadsByCampaign[c.id] ? ` · ${leadsByCampaign[c.id].length}` : ""}
-                        </span>
-                        <span className="text-[11px] text-slate-500">
-                          {c.conditions?.status === "scheduled" && !c.active
-                            ? "Targeted audience (scheduled)"
-                            : "Enrolled · delivery status"}
-                        </span>
-                      </div>
-
-                      {leadsByCampaign[c.id]?.length ? (() => {
-                        const all = leadsByCampaign[c.id];
-                        const pages = Math.max(1, Math.ceil(all.length / LEADS_PER_PAGE));
-                        const page = Math.min(leadPage, pages - 1);
-                        const slice = all.slice(page * LEADS_PER_PAGE, (page + 1) * LEADS_PER_PAGE);
-                        return (
-                          <>
-                            <div className="space-y-1.5">
-                              {slice.map((l) => {
-                                const st = l.enrollmentStatus || "SCHEDULED";
-                                return (
-                                  <div
-                                    key={l.enrollmentId || l.id}
-                                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200/70 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-800"
-                                  >
-                                    <div className="min-w-0">
-                                      <p className="truncate font-semibold text-slate-900 dark:text-white">
-                                        {l.name || "—"}
-                                        <span className="ml-1 font-normal text-slate-500">({l.email})</span>
-                                      </p>
-                                      <p className="mt-0.5 text-[11px] text-slate-400">
-                                        {l.companyName || "No company"}
-                                        {l.emailsSent > 0 && l.lastSentAt
-                                          ? ` · ${l.emailsSent} email${l.emailsSent > 1 ? "s" : ""} sent, last ${new Date(
-                                              l.lastSentAt
-                                            ).toLocaleString(undefined, {
-                                              month: "short",
-                                              day: "numeric",
-                                              hour: "2-digit",
-                                              minute: "2-digit",
-                                            })}`
-                                          : st === "COMPLETED" || st === "ACTIVE"
-                                          ? " · no email recorded yet"
-                                          : ""}
-                                      </p>
-                                    </div>
-                                    <UptoBadge
-                                      tone={
-                                        st === "COMPLETED"
-                                          ? "success"
-                                          : st === "FAILED" || st === "BOUNCED"
-                                          ? "danger"
-                                          : st === "SCHEDULED"
-                                          ? "info"
-                                          : "default"
-                                      }
-                                    >
-                                      {st}
-                                    </UptoBadge>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                            <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
-                              <span>
-                                {page * LEADS_PER_PAGE + 1}–{page * LEADS_PER_PAGE + slice.length} of {all.length}
-                              </span>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  disabled={page === 0}
-                                  onClick={() => setLeadPage(page - 1)}
-                                  className="rounded-lg border border-slate-200 px-3 py-1 font-medium disabled:opacity-40 dark:border-slate-700"
-                                >
-                                  Previous
-                                </button>
-                                <span>Page {page + 1} / {pages}</span>
-                                <button
-                                  type="button"
-                                  disabled={page >= pages - 1}
-                                  onClick={() => setLeadPage(page + 1)}
-                                  className="rounded-lg border border-slate-200 px-3 py-1 font-medium disabled:opacity-40 dark:border-slate-700"
-                                >
-                                  Next
-                                </button>
+                        {c.conditions?.status === "error" && c.conditions?.lastError && (
+                          <tr className="border-t border-slate-200/60 dark:border-white/5">
+                            <td colSpan={5} className="px-4 py-3">
+                              <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50/80 p-3 text-xs text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/20 dark:text-rose-300">
+                                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
+                                <div>
+                                  <span className="font-semibold">Activation error: </span>
+                                  <span>{c.conditions.lastError}</span>
+                                </div>
                               </div>
-                            </div>
-                          </>
-                        );
-                      })()
-                      : loadingLeads ? (
-                        <UptoSpinner compact label="Loading leads..." />
-                      ) : (
-                        <p className="py-2 text-xs text-slate-500">No leads found for this campaign.</p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </UptoCard>
+                            </td>
+                          </tr>
+                        )}
+
+                        {expandedId === c.id && (
+                          <tr className="border-t border-slate-200/60 dark:border-white/5">
+                            <td colSpan={5} className="bg-white/30 px-4 py-4 dark:bg-white/[0.03]">
+                              <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+                                <span className="font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">
+                                  Campaign leads{leadsByCampaign[c.id] ? ` · ${leadsByCampaign[c.id].length}` : ""}
+                                </span>
+                                <span className="text-[11px] text-slate-500">
+                                  {c.conditions?.status === "scheduled" && !c.active ? "Targeted audience (not sent yet)" : "Live delivery status"}
+                                </span>
+                              </div>
+
+                              {leadsByCampaign[c.id]?.length ? (() => {
+                                const all = leadsByCampaign[c.id];
+                                const pages = Math.max(1, Math.ceil(all.length / LEADS_PER_PAGE));
+                                const page = Math.min(leadPage, pages - 1);
+                                const slice = all.slice(page * LEADS_PER_PAGE, (page + 1) * LEADS_PER_PAGE);
+                                const fmt = (v) =>
+                                  new Date(v).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+                                return (
+                                  <>
+                                    <div className="overflow-hidden rounded-xl border border-slate-200/60 dark:border-white/10">
+                                      <table className="w-full text-xs">
+                                        <thead className="bg-white/40 text-left font-semibold uppercase tracking-wide text-slate-500 dark:bg-white/5 dark:text-slate-400">
+                                          <tr>
+                                            <th className="px-3 py-2.5">Lead name</th>
+                                            <th className="px-3 py-2.5">Email</th>
+                                            <th className="px-3 py-2.5">Sent</th>
+                                            <th className="px-3 py-2.5">Sent at</th>
+                                            <th className="px-3 py-2.5">Status</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {slice.map((l) => {
+                                            const st = l.enrollmentStatus || "SCHEDULED";
+                                            const failed = st === "FAILED" || st === "BOUNCED";
+                                            const sent = (l.emailsSent || 0) > 0;
+                                            const stLabel = { COMPLETED: "Completed", ACTIVE: "Running", SCHEDULED: "Scheduled", FAILED: "Failed", BOUNCED: "Bounced" }[st] || st;
+                                            const stCls = st === "COMPLETED" ? STATUS_STYLE.completed : st === "ACTIVE" ? STATUS_STYLE.running : failed ? STATUS_STYLE.stopped : st === "SCHEDULED" ? STATUS_STYLE.scheduled : STATUS_STYLE.draft;
+                                            return (
+                                              <tr key={l.enrollmentId || l.id} className="border-t border-slate-200/50 dark:border-white/5">
+                                                <td className="px-3 py-2.5">
+                                                  <p className="font-semibold text-slate-900 dark:text-white">{l.name || "—"}</p>
+                                                  <p className="text-[11px] text-slate-500">{l.companyName || "No company"}</p>
+                                                </td>
+                                                <td className="px-3 py-2.5 text-slate-600 dark:text-slate-300">{l.email}</td>
+                                                <td className="px-3 py-2.5">
+                                                  <span className={`rounded-full border px-2 py-0.5 font-semibold ${sent ? STATUS_STYLE.completed : failed ? STATUS_STYLE.stopped : STATUS_STYLE.draft}`}>
+                                                    {sent ? `Sent${l.emailsSent > 1 ? ` (${l.emailsSent})` : ""}` : failed ? "Failed" : "Not sent"}
+                                                  </span>
+                                                </td>
+                                                <td className="px-3 py-2.5 text-slate-600 dark:text-slate-300">{sent && l.lastSentAt ? fmt(l.lastSentAt) : "—"}</td>
+                                                <td className="px-3 py-2.5">
+                                                  <span className={`rounded-full border px-2 py-0.5 font-semibold ${stCls}`}>{stLabel}</span>
+                                                </td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                    <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
+                                      <span>
+                                        {page * LEADS_PER_PAGE + 1}–{page * LEADS_PER_PAGE + slice.length} of {all.length}
+                                      </span>
+                                      <div className="flex items-center gap-2">
+                                        <button type="button" disabled={page === 0} onClick={() => setLeadPage(page - 1)} className="rounded-lg border border-slate-200 px-3 py-1 font-medium disabled:opacity-40 dark:border-white/10">
+                                          Previous
+                                        </button>
+                                        <span>Page {page + 1} / {pages}</span>
+                                        <button type="button" disabled={page >= pages - 1} onClick={() => setLeadPage(page + 1)} className="rounded-lg border border-slate-200 px-3 py-1 font-medium disabled:opacity-40 dark:border-white/10">
+                                          Next
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </>
+                                );
+                              })() : loadingLeads ? (
+                                <UptoSpinner compact label="Loading leads..." />
+                              ) : (
+                                <p className="py-2 text-xs text-slate-500">No leads found for this campaign.</p>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </section>
       </div>
 
       {showCreate && (
