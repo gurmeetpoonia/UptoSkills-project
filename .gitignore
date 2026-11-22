@@ -37,3 +37,16 @@ __pycache__/
 *.pyc
 *.log
 
+
+# Local pilot files and patches (contain contact data / not part of the app)
+pilot_*.xlsx
+pilot_phone_followup.csv
+*.backup.xlsx
+*.patch
+tools/leadscore-termux/data/*
+!tools/leadscore-termux/data/.keep
+
+pr1_hr.xlsx
+compose-local.diff
+scraper/output/
+scraper/leads_with_hr.xlsx

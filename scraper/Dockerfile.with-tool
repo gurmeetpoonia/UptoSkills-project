@@ -1,0 +1,26 @@
+# Deploy the scraper TOGETHER with the intelligent tool in one container (no separate tool service,
+# no paid key). Build context must be the REPO ROOT:
+#   Render: Docker  ->  Root Directory: (empty)   Dockerfile Path: scraper/Dockerfile.with-tool
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    LEADSCORE_DIR=/opt/leadscore \
+    LEADSCORE_DATA_DIR=/tmp/leadscore
+
+WORKDIR /app
+
+# libatomic1: Playwright's node driver needs it (without it "playwright install" exits with code 127)
+RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY scraper/requirements.txt .
+# Chromium is only the optional fallback when LinkedIn's guest API returns nothing, so never fail the build for it
+RUN pip install --no-cache-dir -r requirements.txt \
+ && (playwright install --with-deps chromium || echo "WARNING: Chromium not installed; the guest API path still works")
+
+COPY scraper/ .
+# the intelligent tool (standard library only) is imported directly by the scraper
+COPY tools/leadscore-termux/app.py /opt/leadscore/app.py
+
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

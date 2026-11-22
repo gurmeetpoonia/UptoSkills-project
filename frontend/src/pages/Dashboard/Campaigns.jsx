@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import CampaignStudio from "./CampaignStudio";
 import { toast } from "sonner";
+import { pageCache } from "@/utils/pageCache";
 
 const LEAD_STATUS_OPTIONS = [
   { value: "new", label: "New" },
@@ -44,12 +45,164 @@ const LEAD_STATUS_OPTIONS = [
   { value: "lost", label: "Lost" },
 ];
 
+const STATUS_STYLE = {
+  running: "bg-teal-500/10 text-teal-600 dark:text-teal-400 border-teal-500/20",
+  completed: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20",
+  scheduled: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20",
+  draft: "bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20",
+};
+
+const timeAgo = (value) => {
+  if (!value) return "No emails sent yet";
+  const diff = Math.max(0, Date.now() - new Date(value).getTime());
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "Last email: just now";
+  if (min < 60) return `Last email: ${min} min ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `Last email: ${hr} h ago`;
+  return `Last email: ${Math.floor(hr / 24)} d ago`;
+};
+
+const Stat = ({ label, value, hint, accent }) => (
+  <div className="rounded-xl border border-slate-200/80 bg-white/70 p-3 dark:border-slate-800 dark:bg-slate-900/60">
+    <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{label}</div>
+    <div className={`mt-1 text-xl font-bold ${accent || "text-slate-900 dark:text-white"}`}>{value}</div>
+    {hint ? <div className="text-[11px] text-slate-500">{hint}</div> : null}
+  </div>
+);
+
+const FunnelBar = ({ label, count, rate, color }) => (
+  <div>
+    <div className="mb-1 flex items-center justify-between text-xs">
+      <span className="text-slate-500 dark:text-slate-400">{label}</span>
+      <span className="font-semibold text-slate-800 dark:text-slate-100">
+        {count} <span className="font-normal text-slate-500">({rate}%)</span>
+      </span>
+    </div>
+    <div className="h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+      <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(100, rate)}%` }} />
+    </div>
+  </div>
+);
+
+const CampaignOptimization = ({ optimization, loading, updatedAt, onRefresh }) => {
+  const campaigns = optimization?.campaigns || [];
+  const totals = optimization?.totals || {};
+
+  return (
+    <UptoCard className="mb-6">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Campaign Optimization</h2>
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            Live performance of every campaign, updated automatically as emails go out to leads.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-teal-500" />
+            Live{updatedAt ? ` · ${updatedAt.toLocaleTimeString()}` : ""}
+          </span>
+          <button
+            type="button"
+            onClick={onRefresh}
+            className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-medium hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {loading && campaigns.length === 0 ? (
+        <UptoSpinner compact />
+      ) : campaigns.length === 0 ? (
+        <p className="py-6 text-center text-sm text-slate-500">
+          No campaigns yet. Create one and its performance will show up here.
+        </p>
+      ) : (
+        <>
+          <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+            <Stat label="Campaigns" value={totals.campaigns ?? campaigns.length} hint={`${totals.running ?? 0} running`} />
+            <Stat label="Leads enrolled" value={totals.enrolled ?? 0} />
+            <Stat label="Emails sent" value={totals.sent ?? 0} />
+            <Stat label="Open rate" value={`${totals.openRate ?? 0}%`} accent="text-teal-600 dark:text-teal-400" />
+            <Stat label="Click rate" value={`${totals.clickRate ?? 0}%`} accent="text-blue-600 dark:text-blue-400" />
+            <Stat label="Reply rate" value={`${totals.replyRate ?? 0}%`} accent="text-emerald-600 dark:text-emerald-400" />
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            {campaigns.map((c) => (
+              <div
+                key={c.campaignId}
+                className="rounded-xl border border-slate-200/80 p-4 dark:border-slate-800"
+              >
+                <div className="mb-3 flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <h3 className="truncate font-semibold text-slate-900 dark:text-white">{c.campaignName}</h3>
+                    <p className="text-xs text-slate-500">{timeAgo(c.lastSentAt)}</p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span
+                      className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold capitalize ${
+                        STATUS_STYLE[c.status] || STATUS_STYLE.draft
+                      }`}
+                    >
+                      {c.status}
+                    </span>
+                    <UptoBadge>{c.sent} sent</UptoBadge>
+                  </div>
+                </div>
+
+                <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                  <span>
+                    <b className="text-slate-800 dark:text-slate-200">{c.enrolled}</b> leads enrolled
+                  </span>
+                  <span>
+                    <b className="text-slate-800 dark:text-slate-200">{c.delivered}</b> delivered
+                  </span>
+                  <span className={c.bounced > 0 ? "text-rose-500" : ""}>
+                    <b>{c.bounced}</b> bounced ({c.bounceRate}%)
+                  </span>
+                  <span>
+                    <b className="text-slate-800 dark:text-slate-200">{c.replied}</b> replies
+                  </span>
+                </div>
+
+                <div className="space-y-2.5">
+                  <FunnelBar label="Opened" count={c.opened} rate={c.openRate} color="bg-teal-500" />
+                  <FunnelBar label="Clicked" count={c.clicked} rate={c.clickRate} color="bg-blue-500" />
+                  <FunnelBar label="Replied" count={c.replied} rate={c.replyRate} color="bg-emerald-500" />
+                </div>
+
+                {c.recommendations?.length > 0 && (
+                  <div className="mt-3 border-t border-slate-200/70 pt-3 dark:border-slate-800">
+                    <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      Recommendations
+                    </div>
+                    <ul className="space-y-1">
+                      {c.recommendations.map((r, i) => (
+                        <li key={i} className="text-sm text-slate-600 dark:text-slate-300">
+                          • {r}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </UptoCard>
+  );
+};
+
 const Campaigns = () => {
   const s = useUptoStyles();
   const { darkMode } = s;
 
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [items, setItems] = useState(() => pageCache.get("campaigns:list") || []);
+  const [loading, setLoading] = useState(() => !pageCache.get("campaigns:list"));
   const [error, setError] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showStudio, setShowStudio] = useState(false);
@@ -57,11 +210,16 @@ const Campaigns = () => {
   const [tags, setTags] = useState([]);
   const [segments, setSegments] = useState([]);
   const [aiGenerating, setAiGenerating] = useState(false);
-  const [optimization, setOptimization] = useState(null);
+  const [optimization, setOptimization] = useState(() => pageCache.get("campaigns:optimization") || null);
   const [optimizationLoading, setOptimizationLoading] = useState(false);
+  const [optimizationUpdatedAt, setOptimizationUpdatedAt] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
   const [leadsByCampaign, setLeadsByCampaign] = useState({});
   const [loadingLeads, setLoadingLeads] = useState(false);
+
+  const optimizationById = new Map(
+    (optimization?.campaigns || []).map((c) => [c.campaignId, c])
+  );
 
   const toLocalDateTimeInput = (value) => {
     if (!value) return "";
@@ -105,6 +263,7 @@ const Campaigns = () => {
     try {
       const res = await campaignService.list({ limit: 100 });
       const campaignList = res?.items || res || [];
+      pageCache.set("campaigns:list", campaignList);
       setItems(campaignList);
       setError(null);
 
@@ -117,26 +276,29 @@ const Campaigns = () => {
       if (!silent) setLoading(false);
     }
   };
-const loadOptimization = async () => {
-  setOptimizationLoading(true);
+const loadOptimization = async (silent = false) => {
+  if (!silent) setOptimizationLoading(true);
 
   try {
     const result = await campaignService.optimization();
+    pageCache.set("campaigns:optimization", result);
     setOptimization(result);
+    setOptimizationUpdatedAt(new Date());
   } catch (e) {
     console.error("Failed to load campaign optimization:", e);
   } finally {
-    setOptimizationLoading(false);
+    if (!silent) setOptimizationLoading(false);
   }
 };
   useEffect(() => {
-    load();
+    load(!!pageCache.get("campaigns:list"));
     loadMetaData();
-    loadOptimization();
+    loadOptimization(!!pageCache.get("campaigns:optimization"));
 
     const interval = setInterval(() => {
       load(true);
-    }, 15000);
+      loadOptimization(true);
+    }, 10000);
 
     return () => clearInterval(interval);
   }, []);
@@ -499,101 +661,24 @@ const loadOptimization = async () => {
         darkMode={darkMode}
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <UptoButton
-              variant={!showStudio ? "primary" : "secondary"}
-              onClick={() => setShowStudio(false)}
-            >
-              <Megaphone className="mr-1.5 inline h-4 w-4" /> Campaign History
-            </UptoButton>
-            <UptoButton
-              variant={showStudio ? "primary" : "secondary"}
-              onClick={() => setShowStudio(true)}
-            >
-              <Sparkles className="mr-1.5 inline h-4 w-4" /> Create Campaign
-            </UptoButton>
+            {showStudio ? (
+              <UptoButton variant="secondary" onClick={() => setShowStudio(false)}>
+                <Megaphone className="mr-1.5 inline h-4 w-4" /> Back to Campaigns
+              </UptoButton>
+            ) : (
+              <UptoButton variant="primary" onClick={() => setShowStudio(true)}>
+                <Sparkles className="mr-1.5 inline h-4 w-4" /> Create Campaign
+              </UptoButton>
+            )}
           </div>
         }
       />
-      {optimizationLoading ? (
-  <UptoCard className="mb-6">
-    <UptoSpinner />
-  </UptoCard>
-) : optimization?.campaigns?.length > 0 ? (
-  <UptoCard className="mb-6">
-    <div className="mb-4">
-      <h2 className="text-lg font-semibold">Campaign Optimization</h2>
-      <p className="text-sm text-muted-foreground">
-        Performance insights and recommendations based on campaign engagement.
-      </p>
-    </div>
-
-    <div className="space-y-4">
-      {optimization.campaigns.map((campaign) => (
-        <div
-          key={campaign.campaignId}
-          className="rounded-lg border p-4"
-        >
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="font-medium">{campaign.campaignName}</h3>
-
-            <UptoBadge>
-              {campaign.sent} sent
-            </UptoBadge>
-          </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-            <div>
-              <div className="text-xs text-muted-foreground">Open Rate</div>
-              <div className="text-lg font-semibold">
-                {campaign.openRate}%
-              </div>
-            </div>
-
-            <div>
-              <div className="text-xs text-muted-foreground">Click Rate</div>
-              <div className="text-lg font-semibold">
-                {campaign.clickRate}%
-              </div>
-            </div>
-
-            <div>
-              <div className="text-xs text-muted-foreground">Reply Rate</div>
-              <div className="text-lg font-semibold">
-                {campaign.replyRate}%
-              </div>
-            </div>
-
-            <div>
-              <div className="text-xs text-muted-foreground">Replies</div>
-              <div className="text-lg font-semibold">
-                {campaign.replied}
-              </div>
-            </div>
-          </div>
-
-          {campaign.recommendations?.length > 0 && (
-            <div>
-              <div className="text-sm font-medium mb-2">
-                Recommendations
-              </div>
-
-              <ul className="space-y-1">
-                {campaign.recommendations.map((recommendation, index) => (
-                  <li
-                    key={index}
-                    className="text-sm text-muted-foreground"
-                  >
-                    • {recommendation}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
-  </UptoCard>
-) : null}
+      <CampaignOptimization
+        optimization={optimization}
+        loading={optimizationLoading}
+        updatedAt={optimizationUpdatedAt}
+        onRefresh={() => loadOptimization(true)}
+      />
 
       {showStudio && (
         <CampaignStudio onClose={() => setShowStudio(false)} onSaved={() => load()} />
@@ -691,6 +776,15 @@ const loadOptimization = async () => {
                               })
                             : "No schedule"}
                         </span>
+
+                        {optimizationById.get(c.id) && (
+                          <>
+                            <span>•</span>
+                            <span className="font-medium text-teal-600 dark:text-teal-400">
+                              {optimizationById.get(c.id).sent} sent · {optimizationById.get(c.id).enrolled} enrolled
+                            </span>
+                          </>
+                        )}
 
                         {c.conditions?.status === "scheduled" && !c.active && (
                           <>
@@ -803,58 +897,72 @@ const loadOptimization = async () => {
                     </div>
                   )}
 
-                  {/* Leads Drawer: Ab scheduled campaign ke time par bhi audience list dikhegi */}
+                  {/* Leads drawer */}
                   {expandedId === c.id && (
-                    <div className="mt-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/40 p-4">
-                      <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 mb-3 flex items-center justify-between">
-                        <span>Campaign Leads</span>
-                        <span className="text-[11px] font-normal text-slate-500">
-                          {c.conditions?.status === "scheduled" && !c.active
-                            ? "Targeted audience leads (Scheduled)"
-                            : "Enrolled delivery status"}
+                    <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-700 dark:bg-slate-800/40">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <span className="font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">
+                          Campaign leads
+                          {leadsByCampaign[c.id] ? ` · ${leadsByCampaign[c.id].length}` : ""}
                         </span>
-                      </h4>
+                        <span className="text-[11px] text-slate-500">
+                          {c.conditions?.status === "scheduled" && !c.active
+                            ? "Targeted audience (scheduled)"
+                            : "Enrolled · delivery status"}
+                        </span>
+                      </div>
 
-                      {loadingLeads ? (
-                        <div className="py-4">
-                          <UptoSpinner />
-                        </div>
-                      ) : leadsByCampaign[c.id]?.length ? (
-                        <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-                          {leadsByCampaign[c.id].map((l) => (
-                            <div
-                              key={l.enrollmentId || l.id}
-                              className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200/70 dark:border-slate-700 text-xs"
-                            >
-                              <div className="min-w-0">
-                                <p className="font-semibold text-slate-900 dark:text-white truncate">
-                                  {l.name || "—"}{" "}
-                                  <span className="font-normal text-slate-500">({l.email})</span>
-                                </p>
-                                <p className="text-[11px] text-slate-400 mt-0.5">
-                                  {l.companyName || "No Company"}
-                                </p>
-                              </div>
-                              <div className="flex items-center gap-2.5">
+                      {leadsByCampaign[c.id]?.length ? (
+                        <div className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
+                          {leadsByCampaign[c.id].map((l) => {
+                            const st = l.enrollmentStatus || "SCHEDULED";
+                            return (
+                              <div
+                                key={l.enrollmentId || l.id}
+                                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200/70 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-800"
+                              >
+                                <div className="min-w-0">
+                                  <p className="truncate font-semibold text-slate-900 dark:text-white">
+                                    {l.name || "—"}
+                                    <span className="ml-1 font-normal text-slate-500">({l.email})</span>
+                                  </p>
+                                  <p className="mt-0.5 text-[11px] text-slate-400">
+                                    {l.companyName || "No company"}
+                                    {l.emailsSent > 0 && l.lastSentAt
+                                      ? ` · ${l.emailsSent} email${l.emailsSent > 1 ? "s" : ""} sent, last ${new Date(
+                                          l.lastSentAt
+                                        ).toLocaleString(undefined, {
+                                          month: "short",
+                                          day: "numeric",
+                                          hour: "2-digit",
+                                          minute: "2-digit",
+                                        })}`
+                                      : st === "COMPLETED" || st === "ACTIVE"
+                                      ? " · no email recorded yet"
+                                      : ""}
+                                  </p>
+                                </div>
                                 <UptoBadge
                                   tone={
-                                    (l.enrollmentStatus || "SCHEDULED") === "COMPLETED"
+                                    st === "COMPLETED"
                                       ? "success"
-                                      : (l.enrollmentStatus || "SCHEDULED") === "FAILED"
+                                      : st === "FAILED" || st === "BOUNCED"
                                       ? "danger"
-                                      : (l.enrollmentStatus || "SCHEDULED") === "SCHEDULED"
+                                      : st === "SCHEDULED"
                                       ? "info"
                                       : "default"
                                   }
                                 >
-                                  {l.enrollmentStatus || "SCHEDULED"}
+                                  {st}
                                 </UptoBadge>
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
+                      ) : loadingLeads ? (
+                        <UptoSpinner compact label="Loading leads..." />
                       ) : (
-                        <p className="text-xs text-slate-500">No leads found for this campaign.</p>
+                        <p className="py-2 text-xs text-slate-500">No leads found for this campaign.</p>
                       )}
                     </div>
                   )}

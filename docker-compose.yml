@@ -1,3 +1,5 @@
+# One-command setup:  docker compose up --build   ->  http://localhost:8080
+# Secrets come from a root-level ".env" file (copy ".env.example"). Never commit ".env".
 services:
   db:
     image: postgres:16-alpine
@@ -35,21 +37,50 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      DATABASE_URL: postgresql://salesforge:salesforge@db:5432/salesforge?schema=public
-      DIRECT_URL: postgresql://salesforge:salesforge@db:5432/salesforge?schema=public
-      SHADOW_DATABASE_URL: postgresql://salesforge:salesforge@db:5432/salesforge?schema=public
-      REDIS_URL: redis://redis:6379
-      JWT_SECRET: change-this-secret-before-production
-      FRONTEND_URL: http://localhost:8080
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL (Neon pooled URL) in .env}
+      DIRECT_URL: ${DIRECT_URL:?Set DIRECT_URL (Neon direct URL) in .env}
+      SHADOW_DATABASE_URL: ${SHADOW_DATABASE_URL:-postgresql://salesforge:salesforge@db:5432/salesforge_shadow?schema=public}
+      REDIS_URL: ${REDIS_URL:?Set REDIS_URL (live Redis) in .env}
+      SCRAPER_API_URL : http://scraper:8000
+      JWT_SECRET: ${JWT_SECRET:-change-this-secret-before-production}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:8080}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      scraper:
+        condition: service_started
+
+    # migrate deploy applies the migration history (includes the baseline migration) on a fresh DB
     command: ["sh", "-c", "npx prisma migrate deploy && node server.js"]
 
+  scraper:
+    build:
+      context: .
+      dockerfile: scraper/Dockerfile.with-tool
+    restart: unless-stopped
+    environment:
+      APOLLO_API_KEY: ${APOLLO_API_KEY:-}
+      SCRAPER_ENGINE: ${SCRAPER_ENGINE:-linkedin}
+      SERPER_API_KEY: ${SERPER_API_KEY:-}
+    ports:
+      - "8000:8000"
+
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     restart: unless-stopped
     ports:
       - "8080:80"

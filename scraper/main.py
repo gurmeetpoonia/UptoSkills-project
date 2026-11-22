@@ -1,47 +1,406 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import uuid
-import threading
 from typing import Dict, Any, Optional
+import base64
+import binascii
+import os
+import re
+import threading
+import time
+import uuid
 
-from master_job_army import run_master_job_army
+from lead_validation import NOT_DISCLOSED, is_blank, score_lead, verification_label
+from apollo_client import ApolloError, apollo_enabled, find_hr_contacts
+from osm_discovery import as_job_rows, osm_companies
+from company_discovery import collect_companies, discover, find_domain
+from ingest_upload import MAX_BYTES, UploadError, run_ingest
+from intelligent_filter import apply_filter, filter_enabled
+from linkedin_hr_scraper import HR_EXCEL_FILE, match_existing_hr, run_master_job_army
 
 app = FastAPI(title="Master Job Army API")
 
-# Ek saath sirf ek scrape chale (Chromium memory ke liye)
-scrape_lock = threading.Lock()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://uptoskills-project.vercel.app"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# In-memory storage for job statuses
 jobs: Dict[str, Dict[str, Any]] = {}
+
+# Job-search engines (both are kept):
+#   linkedin (default) - LinkedIn guest API + HR-file matching, needs no API key.
+#   serper             - the multi-platform Serper search in master_job_army.py (needs SERPER_API_KEY).
+#   both               - LinkedIn first; if it finds nothing and SERPER_API_KEY is set, use Serper.
+SCRAPER_ENGINE = os.environ.get("SCRAPER_ENGINE", "linkedin").strip().lower()
+SEARCH_TIME_BUDGET = float(os.environ.get("SEARCH_TIME_BUDGET", "40"))  # seconds per live LinkedIn search
+DISCOVERY_TIME_BUDGET = float(os.environ.get("DISCOVERY_TIME_BUDGET", "60"))  # seconds spent crawling company websites
+DEFAULT_DISCOVERY_QUERY = os.environ.get("DEFAULT_DISCOVERY_QUERY", "Software Developer")
+DEFAULT_DISCOVERY_LOCATION = os.environ.get("DEFAULT_DISCOVERY_LOCATION", "India")
+scrape_lock = threading.Lock()  # the Serper engine drives Chromium: one run at a time (memory)
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PHONE_RE = re.compile(r"(?:\+?91[\s-]?)?[6-9]\d{9}")
+
+
+def serper_search(req) -> list:
+    """Run the Serper/Playwright engine (master_job_army.py) and adapt its leads to the shared lead format."""
+    if not os.environ.get("SERPER_API_KEY"):
+        raise RuntimeError("SERPER_API_KEY is not set on the scraper service")
+    import master_job_army as serper_engine  # imported on demand: it needs Playwright
+
+    with scrape_lock:
+        raw = serper_engine.run_master_job_army(
+            search_query=req.query, headful=bool(req.headful), limit=None if filter_enabled() else req.limit
+        )
+    leads = []
+    for item in raw:
+        lead = dict(item)
+        contact = str(lead.get("HR CONTACT") or "")
+        email = _EMAIL_RE.search(contact)
+        phone = _PHONE_RE.search(contact.replace(" ", ""))
+        lead.setdefault("HR NAME", NOT_DISCLOSED)
+        lead["HR EMAIL"] = email.group(0).lower() if email else NOT_DISCLOSED
+        lead["HR PHONE"] = phone.group(0) if phone else NOT_DISCLOSED
+        try:
+            lead = match_existing_hr(lead, None)  # enrich from the HR data when the company is known
+        except Exception:
+            pass
+        leads.append(lead)
+    return leads
+
 
 class ScrapeRequest(BaseModel):
     query: str
-    limit: Optional[int] = None
+    search_type: Optional[str] = "all"
+    limit: Optional[int] = 5
     headful: Optional[bool] = False
+    location: Optional[str] = ""
+    max_pages: Optional[int] = 2
+    selection: Optional[str] = "any"  # intelligent tool: any | email | mobile | both
 
-def scrape_worker(job_id: str, query: str, headful: bool, limit: int):
+
+def clean(value) -> str:
+    return NOT_DISCLOSED if is_blank(value) else str(value).strip()
+
+
+def search_hr_file(query: str, search_type: str, limit) -> list:
+    """Search the HR index (leads_with_hr.xlsx) by HR name, HR email or company."""
+    import pandas as pd
+
+    if not os.path.exists(HR_EXCEL_FILE):
+        raise FileNotFoundError(
+            "HR data file not found on the scraper service. Put leads_with_hr.xlsx next to main.py "
+            "or set HR_EXCEL_PATH."
+        )
+    df = pd.read_excel(HR_EXCEL_FILE)
+    column = {"name": "HR Name", "email": "HR Email", "company": "Company"}[search_type]
+    q = query.strip().lower()
+    max_rows = int(limit or 20)
+    results = []
+
+    for _, row in df.iterrows():
+        if q not in str(row.get(column, "")).lower():
+            continue
+        lead = {
+            "COMPANY": clean(row.get("Company")),
+            "JOB TITLE": clean(row.get("Job Title")),
+            "AREA / LOCATION": clean(row.get("Location")),
+            "SALARY": NOT_DISCLOSED,
+            "HR NAME": clean(row.get("HR Name")),
+            "HR TITLE": "" if is_blank(row.get("HR Title")) else str(row.get("HR Title")).strip(),
+            "HR EMAIL": clean(row.get("HR Email")),
+            "HR PHONE": clean(row.get("Mobile NO:")),
+            "HR PROFILE URL": "" if is_blank(row.get("HR Profile URL")) else str(row.get("HR Profile URL")).strip(),
+            "SOURCE": clean(row.get("Source")),
+            "JOB URL": clean(row.get("Job URL")),
+            "DISCOVERED": "" if is_blank(row.get("Posted")) else str(row.get("Posted"))[:10],
+            "FULL DESCRIPTION": NOT_DISCLOSED,
+        }
+        lead = match_existing_hr(lead, None)  # validate only; the row already is HR data
+        lead["VERIFICATION"] = verification_label(lead["HR EMAIL"], lead["EMAIL STATUS"], True)
+        lead["SCORE"] = score_lead(lead)
+        results.append(lead)
+        if len(results) >= max_rows:
+            break
+
+    results.sort(key=lambda x: x["SCORE"], reverse=True)
+    return results
+
+
+def discover_search(req):
+    """Automatic discovery with free sources (Apollo API is optional and only used when APOLLO_API_KEY is set):
+    LinkedIn jobs (+ the Serper multi-platform search when SERPER_API_KEY is set) -> HR data match ->
+    for companies still without an HR contact, public contacts from the company website -> intelligent tool.
+    Returns (leads before filtering, note)."""
+    query = req.query.strip()
+    if query in ("", "*", "all"):
+        query = DEFAULT_DISCOVERY_QUERY
+    location = req.location or DEFAULT_DISCOVERY_LOCATION
+    problems, linkedin_jobs, other_jobs = [], [], []
     try:
-        with scrape_lock:
-            leads = run_master_job_army(search_query=query, headful=headful, limit=limit)
-        jobs[job_id]["status"] = "done"
-        jobs[job_id]["leads"] = leads
+        linkedin_jobs = run_master_job_army(search_query=query, headful=bool(req.headful), limit=None,
+                                            location=location, max_pages=int(req.max_pages or 2),
+                                            time_budget=SEARCH_TIME_BUDGET)
+    except Exception as e:  # LinkedIn blocked / offline: the other sources still run
+        problems.append(f"LinkedIn: {e}")
+    if os.environ.get("SERPER_API_KEY") and SCRAPER_ENGINE in ("serper", "both", "linkedin"):
+        try:
+            other_jobs = serper_search(req)  # Naukri, Indeed, Wellfound ... through the original Serper engine
+        except Exception as e:
+            problems.append(f"Other job sites: {e}")
+    jobs_found = linkedin_jobs + other_jobs
+    try:  # free map source (OpenStreetMap): extra companies for the website discovery below
+        maps_rows = as_job_rows(osm_companies(query, location), query, location)
+        if maps_rows:
+            jobs_found = jobs_found + maps_rows
     except Exception as e:
-        jobs[job_id]["status"] = "error"
+        problems.append(f"OpenStreetMap: {e}")
+    with_contact = [j for j in jobs_found if str(j.get("HR EMAIL") or NOT_DISCLOSED) != NOT_DISCLOSED
+                    or str(j.get("HR PHONE") or NOT_DISCLOSED) != NOT_DISCLOSED]
+    from_websites, stats = [], {"companies_without_contact": 0, "discovered": 0, "domain_not_found": 0, "nothing_public": 0}
+    try:
+        from_websites, stats = discover(jobs_found, time_budget=DISCOVERY_TIME_BUDGET)
+    except Exception as e:
+        problems.append(f"Company websites: {e}")
+    apollo_leads = []
+    if apollo_enabled():  # optional: only when an Apollo API key is configured (otherwise the pilot stays manual)
+        try:
+            budget = [int(os.environ.get("APOLLO_MAX_ENRICH", "10"))]  # credit guard
+            for entry in collect_companies(jobs_found)[:15]:
+                if budget[0] <= 0:
+                    break
+                domain = find_domain(entry["company"])
+                if not domain:
+                    continue
+                for lead in find_hr_contacts(entry["company"], domain, budget):
+                    lead.update({"JOB TITLE": (entry["positions"] or [""])[0], "AREA / LOCATION": (entry["locations"] or [""])[0],
+                                 "JOB URL": (entry["job_urls"] or [""])[0], "VERIFICATION": "Verified (Apollo)"})
+                    lead["SCORE"] = score_lead(lead)
+                    apollo_leads.append(lead)
+        except ApolloError as e:
+            problems.append(f"Apollo: {e}")
+    merged, seen = [], set()
+    for lead in with_contact + apollo_leads + from_websites:
+        key = str(lead.get("HR EMAIL") or "").lower() or str(lead.get("JOB URL") or lead.get("COMPANY"))
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(lead)
+    note = (f"Live discovery for '{query}' in {location}: {len(jobs_found)} jobs read, "
+            f"{len(with_contact)} with an HR contact, {stats['discovered']} company websites gave a public contact"
+            + (f", {len(apollo_leads)} verified by Apollo." if apollo_enabled() else "."))
+    if problems:
+        note += " Skipped: " + "; ".join(problems) + "."
+    return merged, note
+
+
+def _finish(results: list, note: str, req: ScrapeRequest, limit: int = 0):
+    """Pass the leads through the intelligent tool (valid email/mobile, not expired, not duplicate,
+    scored, with a reason) and keep the best `limit`."""
+    results, filter_note = apply_filter(results, req.selection or "any")
+    limit = int(limit or req.limit or 10)
+    results = results[:limit]
+    notes = [n for n in (note, filter_note) if n]
+    if not results and filter_note:
+        notes.append("Nothing is left after filtering - try another search, or ask for more HR data.")
+    return results, " ".join(notes)
+
+
+def smart_search(req: ScrapeRequest):
+    """Return (results, note). `note` explains an empty/filtered result so the UI never just says "0 leads"."""
+    stype = req.search_type or "all"
+    query = req.query.strip()
+    if stype == "discover":  # automatic live discovery (free sources), screened by the intelligent tool
+        found, note = discover_search(req)
+        return _finish(found, note, req, limit=1000)
+    if query in ("*", "all"):  # list every lead we have (HR data), screened by the intelligent tool
+        results = search_hr_file("", "company", 1000)
+        return _finish(results, "" if results else "No leads available yet in the HR data.", req, limit=1000)
+    if stype in ("name", "email", "company"):
+        results = search_hr_file(query, stype, 1000)
+        note = "" if results else f"No HR record in our HR data matches this {stype}: '{query}'."
+        return _finish(results, note, req)
+    # "all": an email is looked up in the HR data, everything else is a LinkedIn job search.
+    if "@" in query:
+        results = search_hr_file(query, "email", 1000)
+        return _finish(results, "" if results else f"No HR record with the email '{query}'.", req)
+    linkedin_error = ""
+    results = []
+    if SCRAPER_ENGINE in ("linkedin", "both"):
+        try:
+            results = run_master_job_army(
+                search_query=query,
+                headful=bool(req.headful),
+                # With the filter on, read every candidate job: many have no HR contact and will be removed.
+                limit=None if filter_enabled() else req.limit,
+                location=req.location or "",
+                max_pages=int(req.max_pages or 2),
+                time_budget=SEARCH_TIME_BUDGET,
+            )
+        except Exception as e:  # LinkedIn blocked / network error: fall back to the HR data
+            results, linkedin_error = [], str(e)
+    if not results and (SCRAPER_ENGINE == "serper" or (SCRAPER_ENGINE == "both" and os.environ.get("SERPER_API_KEY"))):
+        try:
+            results = serper_search(req)
+        except Exception as e:
+            linkedin_error = f"{linkedin_error} Serper: {e}".strip()
+    if results:
+        # Also show HR records of a company/person with this name that LinkedIn did not list (instant, no network).
+        seen = {(str(r.get("HR EMAIL") or "").lower() or str(r.get("JOB URL") or "")) for r in results}
+        extra = []
+        for kind in ("company", "name"):
+            for hr in search_hr_file(query, kind, 50):
+                key = str(hr.get("HR EMAIL") or "").lower() or str(hr.get("JOB URL") or "")
+                if key and key not in seen:
+                    seen.add(key)
+                    extra.append(hr)
+        return _finish(results + extra, "", req)
+    # LinkedIn gave nothing: the text may be a company or an HR name, so try the HR data.
+    for kind in ("company", "name"):
+        hr_results = search_hr_file(query, kind, 1000)
+        if hr_results:
+            return _finish(hr_results, f"No LinkedIn jobs found for '{query}'; showing HR records matching the {kind}.", req)
+    reason = f" ({linkedin_error})" if linkedin_error else ""
+    return [], (f"No jobs found on LinkedIn for '{query}'{reason} and no HR record matches it. "
+                "LinkedIn may be limiting requests - try again in a few minutes, or search a job title "
+                "like 'Python Developer in Hyderabad'.")
+
+
+def run_job(job_id: str, req: ScrapeRequest):
+    jobs[job_id]["status"] = "running"
+    try:
+        results, note = smart_search(req)
+        jobs[job_id]["results"] = results
+        jobs[job_id]["leads"] = results  # same data under the key the original API used
+        jobs[job_id]["note"] = note
+        jobs[job_id]["status"] = "done"
+    except Exception as e:
         jobs[job_id]["error"] = str(e)
+        jobs[job_id]["status"] = "error"
+
+
+class DiscoverRequest(BaseModel):
+    query: str
+    location: Optional[str] = ""
+    max_companies: Optional[int] = 20
+    max_pages: Optional[int] = 2
+    selection: Optional[str] = "any"
+
+
+def run_discovery(job_id: str, req: DiscoverRequest):
+    """Pilot: jobs -> companies with no HR contact -> public website contacts -> intelligent tool."""
+    jobs[job_id]["status"] = "running"
+    try:
+        scraped = run_master_job_army(search_query=req.query, limit=None, location=req.location or "",
+                                      max_pages=int(req.max_pages or 2), time_budget=SEARCH_TIME_BUDGET)
+        found, stats = discover(scraped, int(req.max_companies or 20))
+        note = (f"Company discovery: {stats['companies_without_contact']} companies without an HR contact, "
+                f"{stats['discovered']} with public contacts, {stats['domain_not_found']} website not found, "
+                f"{stats['nothing_public']} nothing published.")
+        results, filter_note = apply_filter(found, req.selection or "any")
+        jobs[job_id]["results"] = results
+        jobs[job_id]["leads"] = results
+        jobs[job_id]["note"] = " ".join(n for n in (note, filter_note) if n)
+        jobs[job_id]["stats"] = stats
+        jobs[job_id]["status"] = "done"
+    except Exception as e:
+        jobs[job_id]["error"] = str(e)
+        jobs[job_id]["status"] = "error"
+
+
+@app.post("/discover")
+def start_discovery(req: DiscoverRequest, background_tasks: BackgroundTasks):
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail="query is required")
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {"status": "queued", "results": [], "leads": [], "error": None, "note": ""}
+    background_tasks.add_task(run_discovery, job_id, req)
+    return {"job_id": job_id, "status": "queued"}  # read the result with GET /scrape/{job_id}
+
+
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
 
 @app.post("/scrape")
-def start_scraping(req: ScrapeRequest, background_tasks: BackgroundTasks):
+def start_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
+    if req.search_type not in (None, "all", "name", "email", "company", "discover"):
+        raise HTTPException(status_code=400, detail="Invalid search_type")
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {
-        "status": "running",
-        "leads": []
-    }
-    background_tasks.add_task(scrape_worker, job_id, req.query, req.headful, req.limit)
-    return {"job_id": job_id}
+    jobs[job_id] = {"status": "queued", "results": [], "leads": [], "error": None, "note": ""}
+    background_tasks.add_task(run_job, job_id, req)
+    return {"job_id": job_id, "status": "queued"}
+
 
 @app.get("/scrape/{job_id}")
-def get_job_status(job_id: str):
-    if job_id not in jobs:
+def get_scrape(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
-    return jobs[job_id]
+
+# ---------------------------------------------------------------- upload ingestion (Leads page)
+ingest_jobs: Dict[str, Dict[str, Any]] = {}
+INGEST_TIME_BUDGET = float(os.environ.get("INGEST_TIME_BUDGET", "300"))  # seconds per uploaded file
+
+
+class IngestRequest(BaseModel):
+    filename: str
+    content_base64: str
+    selection: Optional[str] = "any"
+
+
+def run_ingest_job(job_id: str, filename: str, data: bytes, selection: str):
+    job = ingest_jobs[job_id]
+    job["status"] = "processing"
+    started = time.time()
+
+    def progress(p):
+        if time.time() - started > INGEST_TIME_BUDGET:
+            raise TimeoutError(f"Processing took longer than {int(INGEST_TIME_BUDGET)} seconds")
+        job["processed"], job["total"] = p["processed"], p["total"]
+
+    try:
+        report = run_ingest(filename, data, progress=progress, mode=selection or "any")
+        job.update(report)
+        job["processed"] = job["total"] = report["summary"]["total"]
+        job["status"] = "done"
+    except UploadError as e:
+        job.update(status="error", error=e.message, error_code=e.code)
+    except TimeoutError as e:
+        job.update(status="error", error=str(e), error_code="timeout")
+    except Exception as e:  # never leave a job hanging in "processing"
+        job.update(status="error", error=f"Unexpected error: {str(e)[:200]}", error_code="internal")
+
+
+@app.post("/ingest")
+def start_ingest(req: IngestRequest, background_tasks: BackgroundTasks):
+    try:
+        data = base64.b64decode(req.content_base64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="content_base64 is not valid base64")
+    if len(data) > MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File is too large")
+    job_id = str(uuid.uuid4())
+    ingest_jobs[job_id] = {"status": "queued", "filename": req.filename, "processed": 0, "total": 0,
+                           "summary": None, "rows": [], "warnings": [], "error": None, "error_code": None,
+                           "created": time.time()}
+    for old in [k for k, v in ingest_jobs.items() if time.time() - v["created"] > 3600]:
+        ingest_jobs.pop(old, None)  # keep memory bounded
+    background_tasks.add_task(run_ingest_job, job_id, req.filename, data, req.selection or "any")
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/ingest/{job_id}")
+def get_ingest(job_id: str):
+    job = ingest_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job

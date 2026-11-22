@@ -7,9 +7,14 @@ WORKDIR /app
 
 # Install Python deps, then the Chromium build that matches the installed
 # playwright version, plus the OS libraries Chromium needs.
+# libatomic1: Playwright's node driver needs it (without it "playwright install" exits with code 127)
+RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
+# Chromium is only the optional fallback when LinkedIn's guest API returns nothing, so never fail the build for it
 RUN pip install --no-cache-dir -r requirements.txt \
- && playwright install --with-deps chromium
+ && (playwright install --with-deps chromium || echo "WARNING: Chromium not installed; the guest API path still works")
 
 COPY . .
 

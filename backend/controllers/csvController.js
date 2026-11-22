@@ -69,7 +69,20 @@ const importLeads = asyncHandler(async (req, res) => {
   const rows = parseCSV(req.body.csv);
   if (rows.length < 2) throw new AppError("CSV must include a header row and at least one data row.", 400);
   const [header, ...body] = rows;
+  // Accept the common spellings, including the HR worksheet headers (HR Name, HR Email, Mobile NO:).
+  const ALIASES = {
+    name: ["hr_name", "full_name", "contact_name"],
+    email: ["hr_email", "email_address", "e_mail"],
+    phone: ["mobile_no", "mobile", "mobile_number", "phone_number", "hr_phone"],
+    company_name: ["company", "organization", "organisation"],
+    job_title: ["hr_title", "title", "designation"],
+  };
   const normalized = header.map((h) => slugify(h).replace(/-/g, "_"));
+  for (const [canonical, names] of Object.entries(ALIASES)) {
+    if (normalized.includes(canonical)) continue;
+    const at = normalized.findIndex((col) => names.includes(col));
+    if (at !== -1) normalized[at] = canonical;
+  }
   const required = ["name", "email"];
   for (const col of required) {
     if (!normalized.includes(col)) throw new AppError(`CSV is missing required column: ${col}`, 400);

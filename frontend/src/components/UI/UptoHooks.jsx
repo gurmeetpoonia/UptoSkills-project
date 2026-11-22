@@ -149,10 +149,10 @@ export const UptoEmptyState = ({ icon: Icon, title, body, action = null }) => {
   );
 };
 
-export const UptoSpinner = ({ label = "Loading..." }) => {
+export const UptoSpinner = ({ label = "Loading...", compact = false }) => {
   const s = useUptoStyles();
   return (
-    <div className={`flex h-full min-h-[300px] items-center justify-center text-sm ${s.subtext}`}>
+    <div className={`flex h-full ${compact ? "py-3" : "min-h-[300px]"} items-center justify-center text-sm ${s.subtext}`}>
       <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#00b5ad] border-t-transparent mr-2" />
       {label}
     </div>

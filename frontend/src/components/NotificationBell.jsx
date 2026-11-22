@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { notificationService } from "@/services";
 import { openEventStream } from "@/lib/api";
 import { Bell, BellRing, Trash2 } from "lucide-react";
@@ -11,6 +11,26 @@ const NotificationBell = () => {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState([]);
   const { requestPermissionAndSubscribe, permission } = usePushNotifications();
+  const wrapRef = useRef(null);
+
+  // Close the dropdown on outside click or Escape.
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("touchstart", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("touchstart", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
 
   useEffect(() => {
     let mounted = true;
@@ -68,7 +88,9 @@ const NotificationBell = () => {
       await notificationService.removeAll();
       setItems([]);
       setUnread(0);
-    } catch {}
+    } catch (err) {
+      console.error("Clear all notifications failed:", err);
+    }
   };
 
   const deleteOne = async (id, isRead) => {
@@ -76,11 +98,13 @@ const NotificationBell = () => {
       await notificationService.remove(id);
       setItems((p) => p.filter((n) => n.id !== id));
       if (!isRead) setUnread((u) => Math.max(0, u - 1));
-    } catch {}
+    } catch (err) {
+      console.error("Delete notification failed:", err);
+    }
   };
 
   return (
-    <div className="relative">
+    <div className="relative" ref={wrapRef}>
       <button
         type="button"
         onClick={() => setOpen((p) => !p)}
@@ -95,13 +119,13 @@ const NotificationBell = () => {
         )}
       </button>
       {open && (
-        <div className="absolute right-0 z-40 mt-2 w-80 max-w-[90vw] sm:w-96 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-gray-800 dark:bg-gray-900">
+        <div className="absolute right-0 z-50 mt-2 w-80 max-w-[90vw] sm:w-96 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-gray-800 dark:bg-gray-900">
           <div className="flex flex-col border-b border-gray-200 dark:border-gray-800">
             <div className="flex items-center justify-between px-4 py-3 text-sm font-semibold">
               <span>Notifications</span>
               <div className="flex items-center gap-3">
-                <button onClick={markAll} className="text-xs font-normal text-teal-600 hover:underline">Mark all read</button>
-                <button onClick={deleteAll} className="text-xs font-normal text-red-500 hover:underline">Clear all</button>
+                <button type="button" onClick={markAll} className="text-xs font-normal text-teal-600 hover:underline">Mark all read</button>
+                <button type="button" onClick={deleteAll} className="text-xs font-normal text-red-500 hover:underline">Clear all</button>
               </div>
             </div>
             {permission === "default" && (
@@ -121,11 +145,11 @@ const NotificationBell = () => {
                   <p className="font-medium text-gray-900 dark:text-white">{n.message}</p>
                   <p className="text-xs text-gray-500">{n.type} · {new Date(n.createdAt).toLocaleString()}</p>
                 </div>
-                <div className="flex flex-col items-end gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                <div className="flex flex-col items-end gap-2">
                   {!n.is_read && (
-                    <button onClick={() => markOne(n.id)} className="text-xs text-teal-600 hover:underline">Read</button>
+                    <button type="button" onClick={() => markOne(n.id)} className="text-xs text-teal-600 hover:underline">Read</button>
                   )}
-                  <button onClick={() => deleteOne(n.id, n.is_read)} className="text-gray-400 hover:text-red-500 transition-colors" title="Delete notification">
+                  <button type="button" onClick={() => deleteOne(n.id, n.is_read)} className="text-gray-400 hover:text-red-500 transition-colors" title="Delete notification">
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>

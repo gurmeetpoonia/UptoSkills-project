@@ -78,6 +78,10 @@ const leadQuerySchema = Joi.object({
     .trim()
     .valid(...sourceValues)
     .optional(),
+  tagId: Joi.number().integer().min(1).optional(),
+  assigneeId: Joi.number().integer().min(1).optional(),
+  scoreMin: Joi.number().min(0).optional(),
+  scoreMax: Joi.number().min(0).optional(),
   page: Joi.number().integer().min(1).default(1),
   limit: Joi.number().integer().min(1).max(100).default(12),
   sortBy: Joi.string()

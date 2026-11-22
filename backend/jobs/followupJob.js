@@ -273,6 +273,13 @@ const tasks = {
               recipient: enrollment.email,
               subject: campaign.name || "Campaign Email",
               messageId: `${Date.now()}-${enrollment.id}`,
+              metadata: {
+                sequenceId: enrollment.sequenceId,
+                campaignId: campaign.id,
+                enrollmentId: enrollment.id,
+                leadId: enrollment.leadId || null,
+                step: enrollment.currentStep,
+              },
             },
           });
 
