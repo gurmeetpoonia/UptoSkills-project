@@ -6,7 +6,7 @@ const { prisma } = require("../config/postgres");
 const { recordActivity } = require("../services/leadActivityService");
 const { enrollLeadInActiveCampaigns } = require("../services/campaignAutomationService");
 const { tagNamesFor, tagLead } = require("../services/autoTagService");
-const { listCandidates, markAdded } = require("../services/findLeadCandidateService");
+const { listCandidates, markAdded, dismissCandidates } = require("../services/findLeadCandidateService");
 const asyncHandler = require("../utils/asyncHandler");
 const response = require("../utils/response");
 const { AppError } = require("../middleware/errorHandler");
@@ -150,6 +150,14 @@ const findLeads = asyncHandler(async (req, res) => {
 const getCandidates = asyncHandler(async (req, res) => {
   const result = await listCandidates(req.orgId, { search: req.query.search });
   return response.success(res, result);
+});
+
+// 1c. POST /api/leads/find/candidates/dismiss  { keys: [...] }  (delete from the Find Leads list)
+const dismissFindCandidates = asyncHandler(async (req, res) => {
+  const keys = Array.isArray(req.body?.keys) ? req.body.keys : [];
+  if (keys.length === 0) throw new AppError("Select at least one lead to delete.", 400);
+  const removed = await dismissCandidates(req.orgId, keys);
+  return response.success(res, { removed });
 });
 
 // 2. GET /api/leads/find/:jobId
@@ -405,6 +413,7 @@ const confirmFindLeads = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  dismissFindCandidates,
   getCandidates,
   findLeads,
   getFindLeadsStatus,

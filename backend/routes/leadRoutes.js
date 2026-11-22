@@ -24,6 +24,7 @@ router.get("/", validate(leadQuerySchema, "query"), ctrl.getLeads);
 // Find Leads Routes
 router.post("/find", permit("OWNER", "ADMIN", "MEMBER"), findCtrl.findLeads);
 router.get("/find/candidates", permit("OWNER", "ADMIN", "MEMBER"), findCtrl.getCandidates);
+router.post("/find/candidates/dismiss", permit("OWNER", "ADMIN", "MEMBER"), findCtrl.dismissFindCandidates);
 router.get("/find/:jobId", permit("OWNER", "ADMIN", "MEMBER"), findCtrl.getFindLeadsStatus);
 router.post("/find/:jobId/confirm", permit("OWNER", "ADMIN", "MEMBER"), findCtrl.confirmFindLeads);
 

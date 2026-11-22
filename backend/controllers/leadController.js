@@ -39,7 +39,26 @@ const buildLeadWhere = ({ search, status, source, tagId, assigneeId, scoreMin, s
     ];
   }
   if (status) where.status = status;
-  if (source) where.source = source;
+  if (source) {
+    // "origin:*" filters match the Source badge in the Leads list (the "Source: X" tag, with the
+    // lead's source field as a fallback). Any other value is the plain source field, as before.
+    const srcTag = (starts) => ({ tags: { some: { tag: { name: { startsWith: `Source: ${starts}`, mode: "insensitive" } } } } });
+    const ORIGINS = {
+      "origin:excel": { OR: [{ source: "import" }, srcTag("Upload")] },
+      "origin:linkedin": srcTag("LinkedIn"),
+      "origin:apollo": srcTag("Apollo"),
+      "origin:website": srcTag("Company website"),
+      "origin:osm": srcTag("OpenStreetMap"),
+      "origin:manual": {
+        AND: [
+          { source: { notIn: ["import", "database_search"] } },
+          { NOT: { tags: { some: { tag: { name: { startsWith: "Source:", mode: "insensitive" } } } } } },
+        ],
+      },
+    };
+    if (ORIGINS[source]) where.AND = [...(where.AND || []), ORIGINS[source]];
+    else where.source = source;
+  }
   if (assigneeId) where.assignedToId = Number(assigneeId);
   if (tagId) where.tags = { some: { tagId: Number(tagId) } };
   if (scoreMin !== undefined || scoreMax !== undefined) {

@@ -110,7 +110,7 @@ const progressOf = (c) => {
   return Math.min(100, Math.round(((c.enrolledByStatus?.COMPLETED || 0) / c.enrolled) * 100));
 };
 
-const CampaignOptimization = ({ optimization, loading, updatedAt, onRefresh }) => {
+const CampaignOptimization = ({ optimization, loading, updatedAt, onRefresh, darkMode }) => {
   const campaigns = optimization?.campaigns || [];
   const totals = optimization?.totals || {};
 
@@ -118,7 +118,7 @@ const CampaignOptimization = ({ optimization, loading, updatedAt, onRefresh }) =
     <section className="mb-8">
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <SectionHeading label="Campaign Optimization" />
+          <SectionHeading label="Campaign Optimization" darkMode={darkMode} />
           <p className="-mt-5 text-sm text-slate-500 dark:text-slate-400">
             Opens, clicks and replies update live as leads interact with your emails.
           </p>
@@ -703,6 +703,8 @@ const loadOptimization = async (silent = false) => {
     );
   };
 
+  const noCampaigns = !loading && !error && items.length === 0;
+
   return (
     <UptoPage>
       <UptoHero
@@ -723,6 +725,23 @@ const loadOptimization = async (silent = false) => {
           </div>
         }
       />
+      {noCampaigns && (
+        <div className="mb-8 flex flex-col items-center rounded-2xl border border-white/50 bg-white/55 px-6 py-16 text-center shadow-[0_8px_32px_rgba(15,23,42,0.10)] backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.04]">
+          <span className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-teal-500/10 text-teal-500">
+            <Megaphone className="h-8 w-8" />
+          </span>
+          <h2 className="text-xl font-semibold text-slate-900 dark:text-white">No campaigns yet</h2>
+          <p className="mt-2 max-w-md text-sm text-slate-500 dark:text-slate-400">
+            Create your first email campaign. Its delivery, opens, clicks and replies will show up here live.
+          </p>
+          <UptoButton variant="primary" className="mt-6" onClick={() => setShowStudio(true)}>
+            <Sparkles className="mr-1.5 inline h-4 w-4" /> Create Campaign
+          </UptoButton>
+        </div>
+      )}
+
+      {!noCampaigns && (
+      <>
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <div className="rounded-2xl p-4 border border-white/50 bg-white/55 shadow-[0_8px_32px_rgba(15,23,42,0.10)] backdrop-blur-xl dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_8px_32px_rgba(0,0,0,0.35)]">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
@@ -763,14 +782,17 @@ const loadOptimization = async (silent = false) => {
         loading={optimizationLoading}
         updatedAt={optimizationUpdatedAt}
         onRefresh={() => loadOptimization(true)}
+        darkMode={darkMode}
       />
+      </>
+      )}
 
       {showStudio && (
         <CampaignStudio onClose={() => setShowStudio(false)} onSaved={() => load()} />
       )}
 
       <div className="w-full space-y-4">
-        <section>
+        <section className={noCampaigns ? "hidden" : ""}>
           <div className="mb-3 flex items-end justify-between gap-3">
             <SectionHeading label="Your Campaigns" darkMode={darkMode} />
             <span className="mb-7 text-xs text-slate-500">{items.length} total</span>

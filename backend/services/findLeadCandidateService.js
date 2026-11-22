@@ -55,8 +55,30 @@ const saveCandidates = async (orgId, leads, { markNew = false } = {}) => {
 // The list for the Find Leads screen: not yet in the CRM, best score first.
 const listCandidates = async (orgId, { search = "" } = {}) => {
   const everSeeded = (await prisma.findLeadCandidate.count({ where: { orgId } })) > 0;
+
+  // A lead that was added and later deleted from the CRM comes back to the list.
+  const added = await prisma.findLeadCandidate.findMany({
+    where: { orgId, addedToCrm: true, dismissed: false, email: { not: null } },
+    select: { email: true },
+    take: 5000,
+  });
+  if (added.length) {
+    const still = await prisma.lead.findMany({
+      where: { email: { in: added.map((a) => a.email) } },
+      select: { email: true },
+    });
+    const have = new Set(still.map((l) => l.email.toLowerCase()));
+    const gone = added.map((a) => a.email).filter((e) => !have.has(String(e).toLowerCase()));
+    if (gone.length) {
+      await prisma.findLeadCandidate.updateMany({
+        where: { orgId, email: { in: gone } },
+        data: { addedToCrm: false },
+      });
+    }
+  }
+
   const rows = await prisma.findLeadCandidate.findMany({
-    where: { orgId, addedToCrm: false },
+    where: { orgId, addedToCrm: false, dismissed: false },
     orderBy: [{ score: "desc" }, { id: "asc" }],
     take: 2000,
   });
@@ -91,6 +113,7 @@ const listCandidates = async (orgId, { search = "" } = {}) => {
   const now = Date.now();
   const leads = visible.map((r) => ({
     ...r.data,
+    __key: r.emailKey,
     __new: r.isNew && now - new Date(r.createdAt).getTime() < NEW_FOR_MS,
   }));
   return { leads, total: leads.length, alreadyInCrm: known.size, seeded: everSeeded };
@@ -107,4 +130,15 @@ const markAdded = async (orgId, emails) => {
   return res.count;
 };
 
-module.exports = { saveCandidates, listCandidates, markAdded, keyOf, emailOf };
+// The user deleted these from the Find Leads list: hide them for good (discovery will not bring them back).
+const dismissCandidates = async (orgId, keys) => {
+  const list = [...new Set((keys || []).map((k) => String(k || "")).filter(Boolean))];
+  if (!orgId || list.length === 0) return 0;
+  const res = await prisma.findLeadCandidate.updateMany({
+    where: { orgId, emailKey: { in: list } },
+    data: { dismissed: true },
+  });
+  return res.count;
+};
+
+module.exports = { saveCandidates, listCandidates, markAdded, dismissCandidates, keyOf, emailOf };

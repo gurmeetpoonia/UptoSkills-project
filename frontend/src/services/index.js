@@ -30,6 +30,7 @@ export const leadService = {
   ingestStatus: (jobId) => unwrap(api.get(`/leads/ingest/${jobId}`)),
   ingestSave: (jobId, rows) => unwrap(api.post(`/leads/ingest/${jobId}/save`, rows ? { rows } : {})),
   candidates: (search = "") => unwrap(api.get("/leads/find/candidates", { params: search ? { search } : {} })),
+  dismissCandidates: (keys) => unwrap(api.post("/leads/find/candidates/dismiss", { keys })),
   getFindStatus: (jobId) => unwrap(api.get(`/leads/find/${jobId}`)),
   confirmFind: (jobId, selectedLeads) => unwrap(api.post(`/leads/find/${jobId}/confirm`, { selectedLeads })),
   exportUrl: (filters = {}) => {

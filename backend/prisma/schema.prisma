@@ -1493,6 +1493,7 @@ model FindLeadCandidate {
   score      Int          @default(0)
   isNew      Boolean      @default(false)
   addedToCrm Boolean      @default(false)
+  dismissed  Boolean      @default(false)
   data       Json
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt

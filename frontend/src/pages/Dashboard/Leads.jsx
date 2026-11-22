@@ -33,11 +33,47 @@ import {
   XCircle,
   Users,
   BadgeCheck,
+  Trash2,
+  Globe,
+  FileSpreadsheet,
 } from "lucide-react";
 import { toast } from "sonner";
 import { pageCache } from "@/utils/pageCache";
 import UploadScraperPanel from "@/components/leads/UploadScraperPanel";
 import { useAuth } from "@/context/AuthContext";
+
+// Where a lead came from, for the Source badge in Your Leads. Uses the "Source: X" tag that Find Leads and
+// Upload CSV / Excel add; older leads fall back to the lead's source field.
+const ORIGIN_STYLE = {
+  excel: "bg-violet-50 text-violet-700 border-violet-200 dark:bg-violet-950/40 dark:text-violet-300 dark:border-violet-800",
+  linkedin: "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-300 dark:border-blue-800",
+  apollo: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800",
+  web: "bg-teal-50 text-teal-700 border-teal-200 dark:bg-teal-950/40 dark:text-teal-300 dark:border-teal-800",
+  other: "bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700",
+};
+// "All Sources" filter: the same groups as the Source badge in the list.
+const ORIGIN_FILTERS = [
+  { value: "origin:excel", label: "Excel / CSV" },
+  { value: "origin:linkedin", label: "LinkedIn scraper" },
+  { value: "origin:apollo", label: "Apollo" },
+  { value: "origin:website", label: "Company website" },
+  { value: "origin:osm", label: "OpenStreetMap" },
+  { value: "database_search", label: "All web-scraper leads" },
+  { value: "origin:manual", label: "Manual" },
+];
+const originOf = (lead) => {
+  const tag = (lead.tags || []).map((t) => t.tag?.name || t.name || "").find((n) => /^Source:/i.test(n));
+  const raw = (tag ? tag.replace(/^Source:\s*/i, "") : "").toLowerCase();
+  const src = String(lead.source || "").toLowerCase();
+  if (raw.includes("upload") || src === "import") return { label: "Excel / CSV", kind: "excel", scraped: false };
+  if (raw.includes("linkedin")) return { label: "LinkedIn scraper", kind: "linkedin", scraped: true };
+  if (raw.includes("apollo")) return { label: raw.includes("manual") ? "Apollo (manual)" : "Apollo", kind: "apollo", scraped: true };
+  if (raw.includes("website")) return { label: "Company website", kind: "web", scraped: true };
+  if (raw.includes("openstreetmap")) return { label: "OpenStreetMap", kind: "web", scraped: true };
+  if (raw) return { label: tag.replace(/^Source:\s*/i, ""), kind: "other", scraped: true };
+  if (src === "database_search") return { label: "Find Leads", kind: "web", scraped: true };
+  return { label: "Manual", kind: "other", scraped: false };
+};
 
 const FIND_MAX_WAIT_MS = 120000; // never show "Searching..." for more than 2 minutes
 
@@ -418,9 +454,13 @@ const Leads = () => {
   const confirmFind = async () => {
     if (findSelected.length === 0) return;
 
-    const selectedLeads = findResults.filter((_, idx) =>
-      findSelected.includes(idx)
+    const selectedLeads = findResults.filter(
+      (l, idx) => findSelected.includes(idx) && canSelectFindLead(l)
     );
+    if (selectedLeads.length === 0) {
+      toast.info("The selected leads have no usable email, so they cannot be added to the CRM.");
+      return;
+    }
 
     try {
       const res = await leadService.confirmFind(
@@ -555,14 +595,23 @@ const Leads = () => {
   };
 
   const toggleFindSelectAll = () => {
-    const validIndices = findResults
-      .map((l, i) => (canSelectFindLead(l) ? i : -1))
-      .filter((i) => i !== -1);
+    setFindSelected(findSelected.length === findResults.length ? [] : findResults.map((_, i) => i));
+  };
 
-    if (findSelected.length === validIndices.length) {
+  // Delete the ticked leads from the Find Leads list (they stay hidden when discovery runs again).
+  const deleteFindSelected = async () => {
+    const picked = findResults.filter((_, idx) => findSelected.includes(idx));
+    if (picked.length === 0) return;
+    if (!window.confirm(`Delete ${picked.length} selected lead${picked.length === 1 ? "" : "s"} from Find Leads?`)) return;
+    try {
+      await leadService.dismissCandidates(picked.map((l) => l.__key).filter(Boolean));
+      const gone = new Set(picked.map((l) => l.__key));
+      setFindResults((prev) => prev.filter((l) => !gone.has(l.__key)));
       setFindSelected([]);
-    } else {
-      setFindSelected(validIndices);
+      pageCache.set("find:candidates:", null);
+      toast.success(`Deleted ${picked.length} lead${picked.length === 1 ? "" : "s"}`);
+    } catch (err) {
+      toast.error(err.message || "Could not delete the leads");
     }
   };
 
@@ -950,13 +999,23 @@ const Leads = () => {
                       : ""}
                   </p>
 
-                  <Button
-                    onClick={confirmFind}
-                    disabled={findSelected.length === 0}
-                    className="bg-[#00b5ad] text-white hover:bg-[#2dd4bf]"
-                  >
-                    Add Selected ({findSelected.length})
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      onClick={deleteFindSelected}
+                      disabled={findSelected.length === 0}
+                      variant="secondary"
+                      className="border border-rose-400/60 bg-transparent text-rose-500 hover:bg-rose-500/10 disabled:opacity-40"
+                    >
+                      <Trash2 className="h-4 w-4" /> Delete Selected ({findSelected.length})
+                    </Button>
+                    <Button
+                      onClick={confirmFind}
+                      disabled={findResults.filter((l, i) => findSelected.includes(i) && canSelectFindLead(l)).length === 0}
+                      className="bg-[#00b5ad] text-white hover:bg-[#2dd4bf]"
+                    >
+                      Add Selected ({findResults.filter((l, i) => findSelected.includes(i) && canSelectFindLead(l)).length})
+                    </Button>
+                  </div>
                 </div>
 
                 <div className="overflow-x-auto rounded-xl border dark:border-slate-800">
@@ -966,11 +1025,7 @@ const Leads = () => {
                         <th className="py-3 px-4 w-12">
                           <input
                             type="checkbox"
-                            checked={
-                              findResults.filter(canSelectFindLead).length > 0 &&
-                              findSelected.length ===
-                                findResults.filter(canSelectFindLead).length
-                            }
+                            checked={findResults.length > 0 && findSelected.length === findResults.length}
                             onChange={toggleFindSelectAll}
                             className="rounded border-slate-300 text-[#00b5ad] focus:ring-[#00b5ad]"
                           />
@@ -990,12 +1045,11 @@ const Leads = () => {
                         return (
                           <tr
                             key={i}
-                            className={!canSelect ? "opacity-60" : ""}
+                            className={!canSelect ? "opacity-70" : ""}
                           >
                             <td className="py-3 px-4">
                               <input
                                 type="checkbox"
-                                disabled={!canSelect}
                                 checked={findSelected.includes(i)}
                                 onChange={() => toggleFindSelect(i)}
                                 className="rounded border-slate-300 text-[#00b5ad] focus:ring-[#00b5ad]"
@@ -1233,6 +1287,32 @@ const Leads = () => {
       )}
 
       {/* Leads table */}
+      {!loading && items.length === 0 && total === 0 && !(filters.search || filters.status || filters.source || filters.tagId) ? (
+        <section>
+          <div className={`flex flex-col items-center rounded-2xl border px-6 py-16 text-center ${card}`}>
+            <span className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-[#00b5ad]/10 text-[#00b5ad]">
+              <Users className="h-8 w-8" />
+            </span>
+            <h2 className={`text-xl font-semibold ${heading}`}>No leads yet</h2>
+            <p className={`mt-2 max-w-md text-sm ${subtext}`}>
+              Upload a CSV or Excel file, let Find Leads discover HR contacts, or add one by hand. Only leads with a valid email are saved here.
+            </p>
+            {isMember && (
+              <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+                <Button onClick={() => openPanel("scraper")}>
+                  <Upload className="h-4 w-4" /> Upload CSV / Excel
+                </Button>
+                <Button onClick={() => openPanel("find")} variant="secondary">
+                  <Search className="h-4 w-4" /> Find Leads
+                </Button>
+                <Button onClick={() => openPanel("create")} variant="secondary">
+                  <Plus className="h-4 w-4" /> New Lead
+                </Button>
+              </div>
+            )}
+          </div>
+        </section>
+      ) : (
       <section>
         <div className="flex flex-wrap items-end justify-between gap-3 mb-3">
           <SectionHeading label="Your Leads" darkMode={darkMode} />
@@ -1280,9 +1360,14 @@ const Leads = () => {
                     className={`rounded-xl border px-3 py-2 text-sm w-full ${inputBg}`}
                   >
                     <option value="">All Sources</option>
-                    {LEAD_SOURCES.map((o) => (
+                    {ORIGIN_FILTERS.map((o) => (
                       <option key={o.value} value={o.value}>{o.label}</option>
                     ))}
+                    {filters.source && !ORIGIN_FILTERS.some((o) => o.value === filters.source) && (
+                      <option value={filters.source}>
+                        {LEAD_SOURCES.find((o) => o.value === filters.source)?.label || filters.source}
+                      </option>
+                    )}
                   </select>
 
                   <select
@@ -1381,6 +1466,7 @@ const Leads = () => {
                     <th className="py-3 px-4">Name</th>
                     <th className="py-3 px-4">Email</th>
                     <th className="py-3 px-4">Company</th>
+                    <th className="py-3 px-4">Source</th>
                     <th className="py-3 px-4">Status</th>
                     <th className="py-3 px-4">Score</th>
                     <th className="py-3 px-4 text-right">Actions</th>
@@ -1411,6 +1497,21 @@ const Leads = () => {
 
                       <td className={`py-3 px-4 ${body}`}>
                         {l.companyName || "—"}
+                      </td>
+
+                      <td className="py-3 px-4">
+                        {(() => {
+                          const o = originOf(l);
+                          return (
+                            <span
+                              title={o.scraped ? "Found by the web scraper" : o.kind === "excel" ? "Imported from a file" : "Added by hand"}
+                              className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-xs font-medium ${ORIGIN_STYLE[o.kind]}`}
+                            >
+                              {o.kind === "excel" ? <FileSpreadsheet className="h-3 w-3" /> : o.scraped ? <Globe className="h-3 w-3" /> : null}
+                              {o.label}
+                            </span>
+                          );
+                        })()}
                       </td>
 
                       <td className="py-3 px-4">
@@ -1467,6 +1568,7 @@ const Leads = () => {
           )}
         </div>
       </section>
+      )}
 
       {pages > 1 && (
         <div className="mt-4 flex items-center justify-center gap-2">
