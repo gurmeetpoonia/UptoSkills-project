@@ -41,12 +41,30 @@ services:
       REDIS_URL: redis://redis:6379
       JWT_SECRET: change-this-secret-before-production
       FRONTEND_URL: http://localhost:8080
+      SCRAPER_API_URL: http://scraper:8000
+      ACCEPT_HR_MAILBOX: ${ACCEPT_HR_MAILBOX:-0}
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      scraper:
+        condition: service_started
     command: ["sh", "-c", "npx prisma migrate deploy && node server.js"]
+
+  scraper:
+    build:
+      context: .
+      dockerfile: scraper/Dockerfile.with-tool
+    restart: unless-stopped
+    environment:
+      APOLLO_API_KEY: ${APOLLO_API_KEY:-}
+      SCRAPER_ENGINE: ${SCRAPER_ENGINE:-linkedin}
+      SERPER_API_KEY: ${SERPER_API_KEY:-}
+      ACCEPT_HR_MAILBOX: ${ACCEPT_HR_MAILBOX:-0}
+      DISCOVERY_MAX_COMPANIES: ${DISCOVERY_MAX_COMPANIES:-40}
+    ports:
+      - "8000:8000"
 
   frontend:
     build: ./frontend
