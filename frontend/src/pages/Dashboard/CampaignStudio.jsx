@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+﻿import React, { useEffect, useMemo, useState } from "react";
 import { campaignService, tagService, savedSearchService } from "@/services";
 import { UptoButton } from "@/components/UI/UptoHooks";
 import {
@@ -10,6 +10,8 @@ import {
   X,
   Edit2,
   Check,
+  Plus,
+  Tag,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -28,7 +30,6 @@ const inputClass =
 const labelClass =
   "block text-xs font-semibold text-slate-700 dark:text-slate-200";
 
-// Helper: Local browser timezone ke mutabiq exact 1 minute aage ka time format karna
 const getLocalOneMinuteAhead = () => {
   const date = new Date(Date.now() + 65 * 1000);
   const pad = (n) => String(n).padStart(2, "0");
@@ -50,9 +51,13 @@ export default function CampaignStudio({ onClose, onSaved }) {
   const [tagId, setTagId] = useState("");
   const [segmentId, setSegmentId] = useState("");
   const [tags, setTags] = useState([]);
+  const [tagsError, setTagsError] = useState("");
   const [segments, setSegments] = useState([]);
 
-  // Default: Current local time se exact 1 minute aage
+  // Inline tag creation state
+  const [newTagName, setNewTagName] = useState("");
+  const [creatingTag, setCreatingTag] = useState(false);
+
   const [schedule, setSchedule] = useState(() => getLocalOneMinuteAhead());
 
   const [tone, setTone] = useState("professional");
@@ -61,6 +66,7 @@ export default function CampaignStudio({ onClose, onSaved }) {
   const [prompt, setPrompt] = useState("");
   const [variants, setVariants] = useState([]);
   const [selectedVariant, setSelectedVariant] = useState("");
+  const [usedFallbackDrafts, setUsedFallbackDrafts] = useState(false);
   const [copyBusy, setCopyBusy] = useState(false);
   const [count, setCount] = useState(null);
   const [sample, setSample] = useState([]);
@@ -72,23 +78,88 @@ export default function CampaignStudio({ onClose, onSaved }) {
   const [editBody, setEditBody] = useState("");
 
   useEffect(() => {
-    Promise.all([
-      tagService.list().catch(() => []),
-      savedSearchService.list({ resource: "leads" }).catch(() => []),
-    ]).then(([a, b]) => {
-      setTags(Array.isArray(a) ? a : a?.tags || a?.items || a?.data || []);
-      setSegments(
-        Array.isArray(b) ? b : b?.items || b?.savedSearches || b?.data || []
-      );
-    });
+    let active = true;
+
+    tagService
+      .list()
+      .then((a) => {
+        if (!active) return;
+        const loadedTags = Array.isArray(a)
+          ? a
+          : a?.tags || a?.items || a?.data || [];
+        setTags(loadedTags);
+        setTagsError("");
+        if (loadedTags.length > 0 && !tagId) {
+          setTagId(String(loadedTags[0].id));
+        }
+      })
+      .catch((err) => {
+        if (!active) return;
+        const msg = err?.message || "Failed to load tags.";
+        setTagsError(msg);
+        toast.error(`Could not load tags: ${msg}`);
+      });
+
+    savedSearchService
+      .list({ resource: "leads" })
+      .then((b) => {
+        if (!active) return;
+        setSegments(
+          Array.isArray(b) ? b : b?.items || b?.savedSearches || b?.data || []
+        );
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
   }, []);
 
-  // Step 2 (Review) par aate hi time ensure karein ki past ka na ho
   useEffect(() => {
     if (step === 2 && (!schedule || new Date(schedule) <= new Date())) {
       setSchedule(getLocalOneMinuteAhead());
     }
   }, [step]);
+
+  const handleCreateInlineTag = async () => {
+    const trimmed = newTagName.trim();
+    if (!trimmed) {
+      toast.error("Enter a tag name first.");
+      return;
+    }
+
+    const existing = tags.find(
+      (t) => t.name?.toLowerCase() === trimmed.toLowerCase()
+    );
+    if (existing) {
+      setTagId(String(existing.id));
+      setNewTagName("");
+      setCount(null);
+      setSample([]);
+      toast.info(`Tag "${existing.name}" already exists and is now selected.`);
+      return;
+    }
+
+    setCreatingTag(true);
+    try {
+      const res = await tagService.create({ name: trimmed });
+      const created = res?.tag ?? res?.data ?? res;
+      if (!created?.id) {
+        throw new Error("Tag created without an ID.");
+      }
+      setTags((prev) => [...prev, created]);
+      setTagsError("");
+      setTagId(String(created.id));
+      setNewTagName("");
+      setCount(null);
+      setSample([]);
+      toast.success(`Tag "${created.name || trimmed}" created and selected.`);
+    } catch (err) {
+      toast.error(err?.message || "Unable to create tag");
+    } finally {
+      setCreatingTag(false);
+    }
+  };
 
   const audience = useMemo(
     () =>
@@ -108,20 +179,31 @@ export default function CampaignStudio({ onClose, onSaved }) {
     type === "all"
       ? "All Leads"
       : type === "status"
-      ? "Status: " + status
+      ? "Status: " + status.replace("_", " ")
       : type === "score"
-      ? "Lead score " + min + "–" + max
+      ? "Lead score " + min + " – " + max
       : type === "tag"
       ? "Tag: " +
-        (tags.find((t) => String(t.id) === String(tagId))?.name || "selected")
+        (tags.find((t) => String(t.id) === String(tagId))?.name || "none selected")
       : "Saved segment: " +
         (segments.find((s) => String(s.id) === String(segmentId))?.name ||
-          "selected");
+          "none selected");
 
   const scan = async () => {
-    if (type === "tag" && !tagId) return toast.error("Select a tag first");
-    if (type === "segment" && !segmentId)
-      return toast.error("Select a saved segment first");
+    if (type === "tag" && !tagId) {
+      return toast.error(
+        tags.length === 0
+          ? "No tags exist yet. Create a tag below or choose All Leads."
+          : "Select a tag first"
+      );
+    }
+    if (type === "segment" && !segmentId) {
+      return toast.error(
+        segments.length === 0
+          ? "No saved segments found. Choose another audience filter."
+          : "Select a saved segment first"
+      );
+    }
     if (
       type === "score" &&
       (min === "" ||
@@ -148,7 +230,11 @@ export default function CampaignStudio({ onClose, onSaved }) {
       }
       setCount(total);
       setSample(examples);
-      toast.success(`Audience preview updated: ${total} matching leads`);
+      if (total === 0) {
+        toast.warning("0 leads match this filter. Adjust your criteria or assign leads first.");
+      } else {
+        toast.success(`Audience preview updated: ${total} matching leads`);
+      }
     } catch (e) {
       toast.error(e?.message || "Unable to preview audience");
     } finally {
@@ -157,8 +243,8 @@ export default function CampaignStudio({ onClose, onSaved }) {
   };
 
   const generateCopy = async () => {
-    if (count === null)
-      return toast.error("Preview the audience before generating drafts.");
+    if (count === null || count === 0)
+      return toast.error("Preview a non-empty audience before generating drafts.");
     setCopyBusy(true);
     try {
       const result = await campaignService.previewCopy({
@@ -175,10 +261,10 @@ export default function CampaignStudio({ onClose, onSaved }) {
       }
       setVariants(data.variants);
       setSelectedVariant(data.variants[0]?.id ?? "");
-      toast.success("Drafts generated. Review them before scheduling.");
+      setUsedFallbackDrafts(false);
+      toast.success("AI drafts generated. Review them before scheduling.");
     } catch (e) {
       console.warn("AI generation delayed or timed out:", e);
-      // Fallback Drafts
       const fallbackDrafts = [
         {
           id: "draft-1",
@@ -199,7 +285,10 @@ export default function CampaignStudio({ onClose, onSaved }) {
       ];
       setVariants(fallbackDrafts);
       setSelectedVariant(fallbackDrafts[0].id);
-      toast.info("Standard campaign drafts created for your review.");
+      setUsedFallbackDrafts(true);
+      toast.warning(
+        "AI draft service is unavailable right now — loaded standard fallback templates instead. You can edit them below."
+      );
     } finally {
       setCopyBusy(false);
     }
@@ -240,7 +329,7 @@ export default function CampaignStudio({ onClose, onSaved }) {
     }
     if (type === "tag" && !tagId) {
       setStep(0);
-      return toast.error("Select a tag");
+      return toast.error("Select or create a tag first");
     }
     if (type === "segment" && !segmentId) {
       setStep(0);
@@ -260,17 +349,17 @@ export default function CampaignStudio({ onClose, onSaved }) {
       return toast.error("Choose a valid score range from 0 to 100");
     }
 
-    if (count === null) {
+    if (count === null || count === 0) {
       setStep(0);
       return toast.error(
-        "Preview the audience before saving to confirm expected leads."
+        "Scan an audience with at least 1 matching lead before saving."
       );
     }
 
     if (!variants || variants.length === 0) {
       setStep(1);
       return toast.error(
-        "Please generate AI email drafts in Step 2 before saving the campaign."
+        "Please generate email drafts in Step 2 before saving the campaign."
       );
     }
 
@@ -295,7 +384,9 @@ export default function CampaignStudio({ onClose, onSaved }) {
           "Email tone: " + tone + ".",
           valueProp.trim() ? "Value proposition: " + valueProp.trim() + "." : "",
           prompt.trim() ? "Campaign owner direction: " + prompt.trim() + "." : "",
-          "Automated outreach campaign via Gemini AI.",
+          usedFallbackDrafts
+            ? "Outreach campaign using fallback email templates."
+            : "Automated outreach campaign via Gemini AI.",
         ]
           .filter(Boolean)
           .join(" "),
@@ -313,9 +404,9 @@ export default function CampaignStudio({ onClose, onSaved }) {
         ],
       });
       toast.success(
-        "Campaign scheduled for " +
-          count +
-          " matching leads. Gemini will personalize each email at send time."
+        usedFallbackDrafts
+          ? `Campaign scheduled for ${count} matching leads using fallback template.`
+          : `Campaign scheduled for ${count} matching leads. Gemini will personalize each email at send time.`
       );
       onSaved?.();
       onClose?.();
@@ -366,7 +457,7 @@ export default function CampaignStudio({ onClose, onSaved }) {
               />
             </div>
 
-            {/* Stepper Tabs - Equal 3 Column Grid */}
+            {/* Stepper Tabs */}
             <nav
               aria-label="Campaign setup steps"
               className="grid grid-cols-3 gap-3 w-full border-b border-slate-200 pb-5 dark:border-slate-700"
@@ -377,8 +468,12 @@ export default function CampaignStudio({ onClose, onSaved }) {
                     type="button"
                     key={x}
                     onClick={() => {
-                      if (i > 0 && count === null) {
-                        toast.error("Preview the audience before continuing.");
+                      if (i > 0 && (count === null || count === 0)) {
+                        toast.error(
+                          count === 0
+                            ? "At least 1 matching lead is required before continuing."
+                            : "Preview the audience before continuing."
+                        );
                         return;
                       }
                       setStep(i);
@@ -423,8 +518,12 @@ export default function CampaignStudio({ onClose, onSaved }) {
                         >
                           <option value="all">All Leads</option>
                           <option value="status">By Status</option>
-                          <option value="tag">By Tag</option>
-                          <option value="segment">By Saved Segment</option>
+                          <option value="tag">
+                            By Tag ({tags.length} available)
+                          </option>
+                          <option value="segment">
+                            By Saved Segment ({segments.length} available)
+                          </option>
                           <option value="score">By Lead Score</option>
                         </select>
                       </div>
@@ -451,24 +550,66 @@ export default function CampaignStudio({ onClose, onSaved }) {
                       )}
 
                       {type === "tag" && (
-                        <div>
-                          <label className={labelClass}>Tag</label>
-                          <select
-                            className={`${inputClass} mt-1`}
-                            value={tagId}
-                            onChange={(e) => {
-                              setTagId(e.target.value);
-                              setCount(null);
-                              setSample([]);
-                            }}
-                          >
-                            <option value="">Choose tag</option>
-                            {tags.map((t) => (
-                              <option key={t.id} value={t.id}>
-                                {t.name}
+                        <div className="space-y-2.5">
+                          <div>
+                            <label className={labelClass}>Tag</label>
+                            <select
+                              className={`${inputClass} mt-1`}
+                              value={tagId}
+                              onChange={(e) => {
+                                setTagId(e.target.value);
+                                setCount(null);
+                                setSample([]);
+                              }}
+                            >
+                              <option value="">
+                                {tags.length === 0
+                                  ? "No tags found — create one below"
+                                  : "Choose tag"}
                               </option>
-                            ))}
-                          </select>
+                              {tags.map((t) => (
+                                <option key={t.id} value={t.id}>
+                                  {t.name}
+                                </option>
+                              ))}
+                            </select>
+                            {tagsError && (
+                              <p className="mt-1 text-[11px] font-medium text-rose-500">
+                                Could not load existing tags: {tagsError}
+                              </p>
+                            )}
+                          </div>
+
+                          {/* Inline Tag Creation */}
+                          <div className="rounded-lg border border-slate-200/80 bg-white/70 p-2.5 dark:border-slate-700/80 dark:bg-slate-800/50">
+                            <label className="flex items-center gap-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                              <Tag className="h-3 w-3 text-teal-600" /> Quick-create tag
+                            </label>
+                            <div className="mt-1.5 flex items-center gap-2">
+                              <input
+                                type="text"
+                                className={`${inputClass} py-1.5 text-xs`}
+                                value={newTagName}
+                                onChange={(e) => setNewTagName(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    handleCreateInlineTag();
+                                  }
+                                }}
+                                placeholder="e.g. hr-outreach"
+                              />
+                              <button
+                                type="button"
+                                disabled={creatingTag}
+                                onClick={handleCreateInlineTag}
+                                className="inline-flex shrink-0 items-center gap-1 rounded-xl bg-teal-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-teal-700 disabled:opacity-50"
+                              >
+                                <Plus className="h-3.5 w-3.5" />
+                                {creatingTag ? "Adding…" : "Add"}
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       )}
 
@@ -484,7 +625,11 @@ export default function CampaignStudio({ onClose, onSaved }) {
                               setSample([]);
                             }}
                           >
-                            <option value="">Choose segment</option>
+                            <option value="">
+                              {segments.length === 0
+                                ? "No saved segments available"
+                                : "Choose segment"}
+                            </option>
                             {segments.map((s) => (
                               <option key={s.id} value={s.id}>
                                 {s.name}
@@ -578,8 +723,14 @@ export default function CampaignStudio({ onClose, onSaved }) {
                           Matching leads from the current preview
                         </p>
                       </div>
-                      <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-teal-50 text-teal-600 dark:bg-teal-950/60 dark:text-teal-400">
-                        Preview Verified
+                      <span
+                        className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+                          count > 0
+                            ? "bg-teal-50 text-teal-600 dark:bg-teal-950/60 dark:text-teal-400"
+                            : "bg-amber-50 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400"
+                        }`}
+                      >
+                        {count > 0 ? "Preview Verified" : "No Matching Leads"}
                       </span>
                     </div>
 
@@ -614,7 +765,7 @@ export default function CampaignStudio({ onClose, onSaved }) {
               </section>
             )}
 
-            {/* Step 1: Personalization (With Inline Edit Feature) */}
+            {/* Step 1: Personalization */}
             {step === 1 && (
               <section className="space-y-4">
                 <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-white">
@@ -685,6 +836,12 @@ export default function CampaignStudio({ onClose, onSaved }) {
                     </UptoButton>
                   </div>
 
+                  {usedFallbackDrafts && variants.length > 0 && (
+                    <div className="rounded-lg border border-amber-300/80 bg-amber-50/80 px-3 py-2 text-xs text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300">
+                      AI generation is currently unavailable, so standard fallback templates were loaded. Review and customize them before scheduling.
+                    </div>
+                  )}
+
                   {variants.length > 0 && (
                     <div className="grid gap-3 md:grid-cols-2">
                       {variants.map((v, index) => {
@@ -705,14 +862,13 @@ export default function CampaignStudio({ onClose, onSaved }) {
                                 : "border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-800/40")
                             }
                           >
-                            {/* Card Top Bar with Edit Option */}
                             <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
                               <span className="text-xs font-semibold text-teal-600 dark:text-teal-400">
                                 Draft {index + 1}
+                                {usedFallbackDrafts ? " (Fallback)" : ""}
                                 {isSelected ? " · Selected" : ""}
                               </span>
 
-                              {/* Edit / Action Buttons */}
                               <div className="flex items-center gap-1.5">
                                 {isEditing ? (
                                   <>
@@ -744,7 +900,6 @@ export default function CampaignStudio({ onClose, onSaved }) {
                               </div>
                             </div>
 
-                            {/* Card Body: Editing vs View Mode */}
                             {isEditing ? (
                               <div className="mt-3 space-y-2.5">
                                 <div>
@@ -813,7 +968,9 @@ export default function CampaignStudio({ onClose, onSaved }) {
                   <div className="rounded-xl bg-slate-50 p-4 dark:bg-slate-800">
                     <BarChart3 className="h-4 w-4 text-teal-600" />
                     <p className="mt-1.5 text-sm font-bold">Email Dispatch</p>
-                    <p className="text-xs text-slate-500">Automated AI Delivery</p>
+                    <p className="text-xs text-slate-500">
+                      {usedFallbackDrafts ? "Fallback Template" : "Automated AI Delivery"}
+                    </p>
                   </div>
                 </div>
 
@@ -825,7 +982,6 @@ export default function CampaignStudio({ onClose, onSaved }) {
                     value={schedule}
                     onChange={(e) => setSchedule(e.target.value)}
                   />
-                  
                 </div>
 
                 <div className="rounded-xl border border-slate-200 p-4 text-xs dark:border-slate-700 space-y-1">
@@ -838,8 +994,16 @@ export default function CampaignStudio({ onClose, onSaved }) {
                   <p>
                     <b>Drafts status:</b>{" "}
                     {variants.length > 0 ? (
-                      <span className="text-emerald-600 font-semibold dark:text-emerald-400">
-                        {variants.length} draft(s) available
+                      <span
+                        className={`font-semibold ${
+                          usedFallbackDrafts
+                            ? "text-amber-600 dark:text-amber-400"
+                            : "text-emerald-600 dark:text-emerald-400"
+                        }`}
+                      >
+                        {variants.length}{" "}
+                        {usedFallbackDrafts ? "fallback template(s)" : "AI draft(s)"}{" "}
+                        available
                         {selectedVariant ? " (1 selected)" : ""}
                       </span>
                     ) : (
@@ -856,7 +1020,7 @@ export default function CampaignStudio({ onClose, onSaved }) {
             )}
           </div>
 
-          {/* Footer - Previous & Next Navigation */}
+          {/* Footer */}
           <footer className="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-6 sm:px-8 py-4 dark:border-slate-800 dark:bg-slate-900/60 shrink-0">
             <span className="text-xs text-slate-500">Step {step + 1} of 3</span>
 
@@ -875,8 +1039,12 @@ export default function CampaignStudio({ onClose, onSaved }) {
               {step < 2 ? (
                 <UptoButton
                   onClick={() => {
-                    if (step === 0 && count === null) {
-                      toast.error("Preview the audience before continuing.");
+                    if (step === 0 && (count === null || count === 0)) {
+                      toast.error(
+                        count === 0
+                          ? "At least 1 matching lead is required before continuing."
+                          : "Preview the audience before continuing."
+                      );
                       return;
                     }
                     setStep(step + 1);

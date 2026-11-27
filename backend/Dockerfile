@@ -1,8 +1,10 @@
-FROM node:20-alpine AS builder
+FROM node:20-alpine
+# Prisma's engines need OpenSSL on Alpine
+RUN apk add --no-cache openssl
 WORKDIR /app
 COPY package*.json ./
 COPY prisma ./prisma
-RUN npm ci
+RUN npm ci || npm install
 RUN npx prisma generate
 COPY . .
 ENV NODE_ENV=production

@@ -1,6 +1,6 @@
 import React from "react";
 import { useNavigate } from "react-router-dom";
-import { Menu, Settings, Plus } from "lucide-react";
+import { Menu, Settings } from "lucide-react";
 import ThemeToggle from "@/context/ThemeToggle";
 import { useAuth } from "@/context/AuthContext";
 import NotificationBell from "@/components/NotificationBell";
@@ -39,8 +39,7 @@ const Header = ({ onToggleSidebar }) => {
             onClick={() => navigate("/leads")}
             className="inline-flex items-center gap-1.5 rounded-xl bg-teal-500 px-3.5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-teal-600 active:scale-95"
           >
-            <Plus className="h-4 w-4" />
-            <span className="hidden sm:inline">New lead</span>
+            <span>New lead</span>
           </button>
         )}
 

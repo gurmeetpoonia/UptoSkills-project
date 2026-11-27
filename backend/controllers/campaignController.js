@@ -781,9 +781,11 @@ const metrics = asyncHandler(async (req, res) => {
 const optimization = asyncHandler(async (req, res) => {
   const campaigns = await prisma.workflow.findMany({
     where: { orgId: req.orgId },
+    orderBy: { createdAt: "desc" },
     select: {
       id: true,
       name: true,
+      active: true,
       conditions: true,
     },
   });
@@ -793,73 +795,125 @@ const optimization = asyncHandler(async (req, res) => {
     select: {
       id: true,
       name: true,
-      steps: true,
+      workflowId: true,
     },
   });
 
   const sequenceByName = new Map(
     sequences.map((sequence) => [sequence.name, sequence])
   );
+  const sequenceByWorkflow = new Map(
+    sequences.filter((s) => s.workflowId).map((s) => [s.workflowId, s])
+  );
 
+  const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0);
   const results = [];
 
   for (const campaign of campaigns) {
-    const sequence = sequenceByName.get(`Campaign: ${campaign.name}`);
+    const sequence =
+      sequenceByWorkflow.get(campaign.id) ||
+      sequenceByName.get(`Campaign: ${campaign.name}`);
+
+    const conditions = campaign.conditions || {};
+    const status = campaign.active
+      ? "running"
+      : conditions.status === "completed"
+        ? "completed"
+        : conditions.status === "scheduled"
+          ? "scheduled"
+          : conditions.status === "paused"
+            ? "paused"
+            : conditions.status === "cancelled"
+              ? "stopped"
+              : "draft";
+
+    const base = {
+      campaignId: campaign.id,
+      campaignName: campaign.name,
+      sequenceId: sequence?.id || null,
+      status,
+      enrolled: 0,
+      enrolledByStatus: {},
+      sent: 0,
+      delivered: 0,
+      opened: 0,
+      clicked: 0,
+      replied: 0,
+      bounced: 0,
+      openRate: 0,
+      clickRate: 0,
+      replyRate: 0,
+      bounceRate: 0,
+      lastSentAt: null,
+      recommendations: [],
+    };
 
     if (!sequence) {
+      base.recommendations.push("Launch this campaign to start sending emails.");
+      results.push(base);
       continue;
     }
+
+    const enrollGroups = await prisma.sequenceEnrollment.groupBy({
+      by: ["status"],
+      where: { sequenceId: sequence.id },
+      _count: { _all: true },
+    });
+    for (const g of enrollGroups) {
+      base.enrolledByStatus[g.status] = g._count._all;
+      base.enrolled += g._count._all;
+    }
+
+    // Emails sent before attribution metadata existed carry the campaign name as
+    // subject and the enrolled lead's address as recipient, so match those too.
+    const enrolledEmails = (
+      await prisma.sequenceEnrollment.findMany({
+        where: { sequenceId: sequence.id },
+        select: { email: true },
+      })
+    ).map((e) => e.email);
 
     const sentEvents = await prisma.emailEvent.findMany({
       where: {
         orgId: req.orgId,
         type: "SENT",
-        metadata: {
-          path: ["sequenceId"],
-          equals: sequence.id,
-        },
+        OR: [
+          { metadata: { path: ["sequenceId"], equals: sequence.id } },
+          ...(enrolledEmails.length
+            ? [{ subject: campaign.name, recipient: { in: enrolledEmails } }]
+            : []),
+        ],
       },
       select: {
         id: true,
         messageId: true,
-        subject: true,
-        metadata: true,
+        createdAt: true,
       },
     });
 
     if (sentEvents.length === 0) {
-      results.push({
-        campaignId: campaign.id,
-        campaignName: campaign.name,
-        sequenceId: sequence.id,
-        sent: 0,
-        opened: 0,
-        clicked: 0,
-        replied: 0,
-        openRate: 0,
-        clickRate: 0,
-        replyRate: 0,
-        recommendations: ["No attributed email data yet."],
-      });
+      base.recommendations.push(
+        base.enrolled > 0
+          ? "Leads are enrolled; emails will appear here as soon as they are sent."
+          : "No attributed email data yet."
+      );
+      results.push(base);
       continue;
     }
 
-    const messageIds = sentEvents
-      .map((event) => event.messageId)
-      .filter(Boolean);
+    const messageIds = sentEvents.map((e) => e.messageId).filter(Boolean);
 
     const engagementEvents = await prisma.emailEvent.findMany({
       where: {
         orgId: req.orgId,
         messageId: { in: messageIds },
         type: {
-          in: ["OPENED", "CLICKED", "REPLIED"],
+          in: ["DELIVERED", "OPENED", "CLICKED", "REPLIED", "BOUNCED"],
         },
       },
       select: {
         messageId: true,
         type: true,
-        metadata: true,
       },
     });
 
@@ -870,17 +924,25 @@ const optimization = asyncHandler(async (req, res) => {
           .map((event) => event.messageId)
       ).size;
 
+    const sent = sentEvents.length;
     const opened = uniqueByType("OPENED");
     const clicked = uniqueByType("CLICKED");
     const replied = uniqueByType("REPLIED");
+    const bounced = uniqueByType("BOUNCED");
+    const delivered = Math.max(uniqueByType("DELIVERED"), sent - bounced);
 
-    const sent = sentEvents.length;
-
-    const openRate = Math.round((opened / sent) * 100);
-    const clickRate = Math.round((clicked / sent) * 100);
-    const replyRate = Math.round((replied / sent) * 100);
+    const openRate = pct(opened, sent);
+    const clickRate = pct(clicked, sent);
+    const replyRate = pct(replied, sent);
+    const bounceRate = pct(bounced, sent);
 
     const recommendations = [];
+
+    if (bounceRate >= 5) {
+      recommendations.push(
+        "High bounce rate: verify emails before sending and remove invalid addresses."
+      );
+    }
 
     if (openRate < 20) {
       recommendations.push(
@@ -913,22 +975,44 @@ const optimization = asyncHandler(async (req, res) => {
     }
 
     results.push({
-      campaignId: campaign.id,
-      campaignName: campaign.name,
-      sequenceId: sequence.id,
+      ...base,
       sent,
+      delivered,
       opened,
       clicked,
       replied,
+      bounced,
       openRate,
       clickRate,
       replyRate,
+      bounceRate,
+      lastSentAt: sentEvents.reduce(
+        (max, e) => (e.createdAt > max ? e.createdAt : max),
+        sentEvents[0].createdAt
+      ),
       recommendations,
     });
   }
 
+  const sum = (key) => results.reduce((acc, c) => acc + (c[key] || 0), 0);
+  const totals = {
+    campaigns: results.length,
+    running: results.filter((c) => c.status === "running").length,
+    enrolled: sum("enrolled"),
+    sent: sum("sent"),
+    opened: sum("opened"),
+    clicked: sum("clicked"),
+    replied: sum("replied"),
+    bounced: sum("bounced"),
+  };
+  totals.openRate = pct(totals.opened, totals.sent);
+  totals.clickRate = pct(totals.clicked, totals.sent);
+  totals.replyRate = pct(totals.replied, totals.sent);
+  totals.bounceRate = pct(totals.bounced, totals.sent);
+
   return response.success(res, {
     campaigns: results,
+    totals,
     generatedAt: new Date(),
   });
 });
@@ -965,9 +1049,35 @@ const getEnrolledLeads = asyncHandler(async (req, res) => {
     : [];
   const leadById = new Map(leads.map((l) => [l.id, l]));
 
+  const enrolledEmails = enrollments.map((e) => e.email).filter(Boolean);
+  const sentEvents = enrolledEmails.length
+    ? await prisma.emailEvent.findMany({
+        where: {
+          orgId: req.orgId,
+          type: "SENT",
+          recipient: { in: enrolledEmails },
+          OR: [
+            { metadata: { path: ["sequenceId"], equals: sequence.id } },
+            { subject: campaign.name },
+          ],
+        },
+        select: { recipient: true, createdAt: true },
+      })
+    : [];
+  const sentByEmail = new Map();
+  for (const ev of sentEvents) {
+    const cur = sentByEmail.get(ev.recipient) || { count: 0, last: null };
+    cur.count += 1;
+    if (!cur.last || ev.createdAt > cur.last) cur.last = ev.createdAt;
+    sentByEmail.set(ev.recipient, cur);
+  }
+
   const result = enrollments.map((enrollment) => {
     const lead = enrollment.leadId ? leadById.get(enrollment.leadId) : null;
+    const sentInfo = sentByEmail.get(enrollment.email);
     return {
+      emailsSent: sentInfo?.count || 0,
+      lastSentAt: sentInfo?.last || null,
       enrollmentId: enrollment.id,
       leadId: enrollment.leadId,
       name: lead?.name || null,
